@@ -153,11 +153,9 @@ def low_confidence_tagger(state: ConversationState) -> ConversationState:
             else:
                 tagged_member = "shubham"  # Ultimate fallback
         
-        # Build the Slack mention
+        # Build the Slack mention — only the tag, no extra text
         mention = resolve_mention(tagged_member)
-        
-        # Build the tagging message - simple and direct
-        tagging_message = f"Hey {mention}, please look into this."
+        tagging_message = mention
         
         response_blocks = slack_client.format_response_blocks(
             response_text=tagging_message,
@@ -205,6 +203,8 @@ def low_confidence_tagger(state: ConversationState) -> ConversationState:
         # Save conversation record
         processing_time = (datetime.now() - state["processing_start_time"]).total_seconds()
         
+        retrieval_queries = json.dumps(state.get("retrieval_history", [])) if state.get("retrieval_history") else None
+        retrieval_file_paths = json.dumps([f.path for f in state.get("research_files", [])]) if state.get("research_files") else None
         db.save_conversation(
             ConversationRecord(
                 id=None,
@@ -226,6 +226,8 @@ def low_confidence_tagger(state: ConversationState) -> ConversationState:
                 created_at=state["processing_start_time"],
                 resolved=False,
                 resolved_at=None,
+                retrieval_queries=retrieval_queries,
+                retrieval_file_paths=retrieval_file_paths,
             )
         )
         
@@ -237,7 +239,7 @@ def low_confidence_tagger(state: ConversationState) -> ConversationState:
             channel_id=channel_id,
         )
         state["error"] = str(e)
-        # Fallback: tag CTO as ultimate escalation
-        state["response_text"] = f"Flagging this for {resolve_mention('shubham')} to review."
+        # Fallback: tag CTO as ultimate escalation (only the mention)
+        state["response_text"] = resolve_mention("shubham")
     
     return state

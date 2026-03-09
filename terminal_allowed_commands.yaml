@@ -1,0 +1,84 @@
+# Terminal Tool Configuration
+# This file defines which commands agents are allowed to execute
+
+# Exact commands that are allowed (no arguments validation)
+allowed_commands:
+  - ls
+  - pwd
+  - whoami
+  - date
+  - uname
+  - cat
+  - head
+  - tail
+  - rg
+  - ast-grep
+  - find
+  - tree
+  - git
+
+# Regex patterns for commands with arguments
+# These patterns are matched against the full command string
+allowed_patterns:
+  # File listing
+  - "^ls\\s*"
+  - "^ls\\s+-[la]*\\s*"
+
+  # File reading
+  - "^cat\\s+"
+  - "^head\\s+"
+  - "^tail\\s+"
+  - "^head\\s+-n\\s+\\d+\\s+"
+  - "^tail\\s+-n\\s+\\d+\\s+"
+
+  # Search and find
+  - "^grep\\s+"
+  - "^grep\\s+-[rli]*\\s+"
+  - "^find\\s+"
+  - "^find\\s+\\.\\s+"
+  
+  # Ripgrep (rg) - code search
+  - "^rg\\s+"
+  - "^rg\\s+-[A-Za-z]*\\s+"
+  - "^rg\\s+--json\\s+"
+  - "^rg\\s+--glob\\s+"
+  
+  # ast-grep - AST-based code search
+  - "^ast-grep\\s+"
+  - "^ast-grep\\s+-lang\\s+"
+  - "^ast-grep\\s+--pattern\\s+"
+  - "^ast-grep\\s+--json\\s+"
+
+  # Git - version control operations
+  - "^git\\s+clone\\s+"
+  - "^git\\s+pull\\s*"
+  - "^git\\s+fetch\\s*"
+  - "^git\\s+status\\s*"
+  - "^git\\s+log\\s*"
+  - "^git\\s+branch\\s*"
+  - "^git\\s+checkout\\s+"
+  - "^cd\\s+"
+
+  # Directory and path
+  - "^pwd$"
+
+  # Text output
+  - "^echo\\s+"
+
+  # Word count
+  - "^wc\\s+"
+  - "^wc\\s+-[lwc]*\\s+"
+
+  # Directory tree
+  - "^tree\\s*"
+  - "^tree\\s+-[Ld]*\\s*"
+
+# Timeout for command execution in seconds
+timeout: 60
+
+# Maximum output length in characters (output will be truncated if longer)
+max_output_length: 10000
+
+# Optional: Set a working directory for all commands
+# If not set, uses current working directory
+# working_directory: /path/to/working/dir

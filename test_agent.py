@@ -2,8 +2,11 @@
 """
 Local test harness for the OLake Slack Community Agent.
 
-Simulates a Slack thread conversation without needing a running Slack workspace
-or webhook server. Uses the real LangGraph agent graph end-to-end.
+Uses the **production** agent graph (agent.graph.create_agent_graph) — the same
+workflow as main.py in prod. So any changes to the main agent are reflected here
+and in production. Do not switch this to the CLI graph; keep testing the real graph.
+
+Simulates a Slack thread (patched client, no real Slack posts).
 
 Usage:
     python test_agent.py                          # interactive mode
@@ -19,8 +22,16 @@ import time
 import uuid
 import argparse
 import textwrap
+import threading
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+
+# Rich for live progress (thinking / search_intent / commands / files)
+from rich.console import Console, Group
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.text import Text
+from rich.tree import Tree
 
 # ── pretty output helpers ──────────────────────────────────────────────────
 RESET  = "\033[0m"
@@ -88,41 +99,40 @@ def success(text):
     print(f"{GREEN}  ✓  {text}{RESET}")
 
 
-# ── pretty docs printer ────────────────────────────────────────────────────
-def print_docs_retrieved(docs: List[Any], iteration: int = None):
-    """Pretty print retrieved documentation."""
-    if not docs:
+# ── pretty research files printer (ripgrep/ast-grep codebase search) ─────────
+def print_research_files(files: List[Any], iteration: int = None):
+    """Pretty print research files from codebase search (ripgrep/ast-grep)."""
+    if not files:
         print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
-        print(f"{BOX_V} {BOLD}{MAGENTA}📄 DOCS RETRIEVED{RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_V} {BOLD}{MAGENTA}📁 FILES RETRIEVED{RESET}".ljust(58) + f"{BOX_V}")
         print(f"{BOX_V}{BOX_H*56}{BOX_V}")
-        print(f"{BOX_V}  {DIM}No docs retrieved (below threshold or fallback){RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_V}  {DIM}No files found (codebase search){RESET}".ljust(58) + f"{BOX_V}")
         print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
         return
-    
+
     iter_label = f" (iteration {iteration})" if iteration else ""
     print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
-    print(f"{BOX_V} {BOLD}{MAGENTA}📄 DOCS RETRIEVED{RESET}{DIM}{iter_label}{RESET}".ljust(58) + f"{BOX_V}")
-    print(f"{BOX_V}  Found {GREEN}{len(docs)}{RESET} relevant document(s)".ljust(58) + f"{BOX_V}")
+    print(f"{BOX_V} {BOLD}{MAGENTA}📁 FILES RETRIEVED{RESET}{DIM}{iter_label}{RESET}".ljust(58) + f"{BOX_V}")
+    print(f"{BOX_V}  Found {GREEN}{len(files)}{RESET} file(s) via ripgrep/ast-grep".ljust(58) + f"{BOX_V}")
     print(f"{BOX_V}{BOX_H*56}{BOX_V}")
-    
-    for i, doc in enumerate(docs[:5], 1):  # Show top 5
-        title = getattr(doc, 'title', 'Unknown')[:45]
-        score = getattr(doc, 'relevance_score', 0)
-        source = getattr(doc, 'source_type', 'docs')
-        content = getattr(doc, 'content', '')[:120].replace('\n', ' ')
-        
-        source_icon = "📖" if source == "docs" else "💻"
+
+    for i, f in enumerate(files[:5], 1):
+        path = getattr(f, "path", str(f))[:45]
+        score = getattr(f, "relevance_score", 0)
+        source = getattr(f, "source", "ripgrep")
+        reason = (getattr(f, "retrieval_reason", "") or "")[:80].replace("\n", " ")
+
         score_color = GREEN if score >= 0.7 else YELLOW if score >= 0.4 else RED
-        
-        print(f"{BOX_V}  {source_icon} [{i}] {title}".ljust(58) + f"{BOX_V}")
-        print(f"{BOX_V}     Score: {score_color}{score:.2%}{RESET}  |  Type: {source}".ljust(58) + f"{BOX_V}")
-        print(f"{BOX_V}     {DIM}«{content}...»{RESET}".ljust(58) + f"{BOX_V}")
-        if i < len(docs) and i < 5:
+        icon = "🔍" if source == "ripgrep" else "🌲"
+        print(f"{BOX_V}  {icon} [{i}] {path}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_V}     Score: {score_color}{score:.2%}{RESET}  |  {source}".ljust(58) + f"{BOX_V}")
+        if reason:
+            print(f"{BOX_V}     {DIM}{reason}...{RESET}".ljust(58) + f"{BOX_V}")
+        if i < len(files) and i < 5:
             print(f"{BOX_V}  {DIM}{'─'*50}{RESET}".ljust(58) + f"{BOX_V}")
-    
-    if len(docs) > 5:
-        print(f"{BOX_V}  {DIM}... and {len(docs) - 5} more document(s){RESET}".ljust(58) + f"{BOX_V}")
-    
+
+    if len(files) > 5:
+        print(f"{BOX_V}  {DIM}... and {len(files) - 5} more file(s){RESET}".ljust(58) + f"{BOX_V}")
     print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
 
 
@@ -233,6 +243,73 @@ def make_event(
         },
     }
 
+def _build_progress_display(events: List[Dict], still_running: bool):
+    """Build Rich renderable for live progress (streamed thinking, search_intent, commands, files)."""
+    parts = []
+    streamed_by_iter: Dict[int, str] = {}
+    for ev in events:
+        if ev.get("type") == "thinking_chunk":
+            it = ev.get("iteration", 0)
+            streamed_by_iter[it] = streamed_by_iter.get(it, "") + (ev.get("delta") or "")
+
+    started_iters = [ev["iteration"] for ev in events if ev.get("type") == "thinking_start"]
+    done_iters = {ev["iteration"] for ev in events if ev.get("type") == "thinking_done"}
+    current_iter = next((it for it in reversed(started_iters) if it not in done_iters), None)
+    if still_running and current_iter is not None:
+        parts.append(Group(Spinner("dots"), Text("  Thinking…", style="cyan")))
+
+    tree = Tree("[bold]Research progress[/bold]", expanded=True)
+    for ev in events:
+        t = ev.get("type")
+        if t == "thinking_done":
+            it = ev.get("iteration", 0)
+            preview = ev.get("preview", "")
+            full = ev.get("thinking", "")
+            branch = tree.add(
+                f"[dim]▸[/dim] [magenta]Thinking (iteration {it}):[/magenta] {preview}",
+                expanded=False,
+            )
+            branch.add(Text(full, style="dim"))
+        elif t == "search_intent":
+            text = ev.get("text", "")
+            tree.add(f"[dim]▸[/dim] [blue]Search intent:[/blue] {text}")
+        elif t == "commands_ran":
+            cmds = ev.get("commands", [])
+            branch = tree.add("[dim]▸[/dim] [yellow]Commands ran:[/yellow]", expanded=False)
+            for c in cmds:
+                branch.add(Text(c, style="dim"))
+        elif t == "files_found":
+            count = ev.get("count", 0)
+            paths = ev.get("paths", [])
+            summary = ", ".join(paths[:3])
+            if len(paths) > 3:
+                summary += f" (+{len(paths) - 3} more)"
+            if not summary:
+                summary = "(none)"
+            branch = tree.add(
+                f"[dim]▸[/dim] [green]Files found ({count}):[/green] {summary}",
+                expanded=False,
+            )
+            for p in paths[:15]:
+                branch.add(Text(p, style="dim"))
+            if len(paths) > 15:
+                branch.add(Text(f"... and {len(paths) - 15} more", style="dim"))
+
+    if current_iter is not None:
+        streamed = streamed_by_iter.get(current_iter, "")
+        preview = (streamed[:80] + "…") if len(streamed) > 80 else (streamed or "…")
+        branch = tree.add(
+            f"[dim]▸[/dim] [magenta]Thinking (iteration {current_iter}):[/magenta] {preview}",
+            expanded=False,
+        )
+        branch.add(Text(streamed or "Waiting for model…", style="dim"))
+
+    if parts:
+        parts.append(tree)
+        return Group(*parts)
+    return tree
+
+
 def _patch_slack_for_local_testing():
     """
     Replace the live SlackClient with a local mock so API calls don't fail.
@@ -317,10 +394,48 @@ def run_message(
     event = make_event(text, user_id, channel_id, thread_ts)
     state = create_initial_state(event)
 
+    # Live progress (thinking / search_intent / commands / files) during deep_researcher
+    progress_events: List[Dict] = []
+    progress_lock = threading.Lock()
+
+    def on_progress(ev: dict) -> None:
+        with progress_lock:
+            progress_events.append(ev)
+
+    state["_cli_progress_callback"] = on_progress
+
+    result_holder: List[Optional[dict]] = [None]
+    exc_holder: List[Optional[Exception]] = [None]
+
+    def run_graph() -> None:
+        try:
+            result_holder[0] = graph.invoke(state)
+        except Exception as e:
+            exc_holder[0] = e
+
     start = time.time()
-    result = graph.invoke(state)
+    graph_thread = threading.Thread(target=run_graph)
+    graph_thread.start()
+
+    def make_display():
+        with progress_lock:
+            events_snapshot = list(progress_events)
+        return _build_progress_display(events_snapshot, graph_thread.is_alive())
+
+    console = Console()
+    with Live(make_display(), refresh_per_second=4, console=console) as live:
+        while graph_thread.is_alive():
+            live.update(make_display())
+            time.sleep(0.25)
+        live.update(make_display())
+    graph_thread.join()
+
     elapsed = time.time() - start
 
+    if exc_holder[0] is not None:
+        raise exc_holder[0]
+
+    result = result_holder[0]
     return {"state": result, "elapsed": elapsed}
 
 
@@ -349,22 +464,30 @@ def print_result(result: dict, iteration: int = None):
         escalation_reason=escalation_reason
     )
     
-    # Docs retrieved
-    docs = state.get("retrieved_docs", [])
-    print_docs_retrieved(docs, iteration=iteration)
-    
+    # Search history (what was searched and why — 1–2 lines per iteration)
+    search_history = state.get("search_history", [])
+    if search_history:
+        section_header("SEARCH INTENT (what was searched and why)")
+        for i, entry in enumerate(search_history, 1):
+            print(f"  {i}. {entry}")
+        footer()
+
+    # Research files (ripgrep/ast-grep codebase search; no vectordb)
+    research_files = state.get("research_files", [])
+    print_research_files(research_files, iteration=iteration)
+
     # Error
     if state.get("error"):
         error(f"Agent error: {state['error']}")
-    
+
     # Final result with latency
     response = state.get("response_text") or ""
     clarification_questions = state.get("clarification_questions", [])
-    
+
     print_final_result(
         response=response,
         latency=elapsed,
-        docs_count=len(docs),
+        docs_count=len(research_files),
         confidence=confidence,
         clarification_questions=clarification_questions
     )
@@ -381,6 +504,10 @@ def main():
     parser.add_argument("--thread-ts", help="Reuse an existing thread TS")
     args = parser.parse_args()
 
+    # Disable agent console logging so Rich Live progress display is not overwritten by INFO lines
+    from agent.logger import get_logger
+    get_logger(enable_console=False)
+
     header("OLake Community Agent — Local Test Harness")
 
     # Patch Slack so local tests don't fail with channel_not_found / missing_scope
@@ -389,6 +516,7 @@ def main():
     info("Loading agent graph (may take a moment on first run)…")
 
     try:
+        # Production graph only — same as main.py so local tests reflect prod behavior
         from agent.graph import create_agent_graph
         graph = create_agent_graph()
         success("Graph loaded ✓")
@@ -448,14 +576,6 @@ def main():
 
     except KeyboardInterrupt:
         pass
-
-    finally:
-        # Cleanup: close HTTP client properly to avoid event loop errors
-        try:
-            from agent.rag_client import close_client
-            close_client()
-        except Exception:
-            pass
 
     print(f"\n{DIM}Session ended.{RESET}")
 

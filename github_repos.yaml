@@ -1,0 +1,26 @@
+# GitHub Repository Tracker Configuration
+# 
+# Add repositories you want to track and search locally.
+# Repos are cloned to .github_repos/ directory (hidden).
+#
+# Usage:
+#   1. Add your repos below
+#   2. Run: python agent/github_repo_tracker.py add <name> <url>
+#   3. Run: ./setup_cron.sh  (to setup automatic syncing)
+#
+# Sync frequencies: hourly, daily, weekly
+
+repositories:
+  # Example: OLake (data ingestion tool)
+  olake:
+    url: https://github.com/datazip-inc/olake.git
+    branch: master
+    enabled: true
+    sync_frequency: daily
+
+  # Example: Add more repos here
+  # my-repo:
+  #   url: https://github.com/username/repo.git
+  #   branch: main
+  #   enabled: true
+  #   sync_frequency: daily

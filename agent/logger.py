@@ -35,37 +35,42 @@ class EventType(Enum):
 
 class StructuredLogger:
     """Structured logger for agent events."""
-    
-    def __init__(self, log_dir: str = "logs", log_level: str = "INFO"):
+
+    def __init__(self, log_dir: str = "logs", log_level: str = "INFO", enable_console: bool = True):
         """
         Initialize structured logger.
-        
+
         Args:
             log_dir: Directory for log files
             log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+            enable_console: Whether to log to console (disable for CLI mode to avoid duplicates)
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
-        
+
         # Create separate log files
         self.events_log = self.log_dir / "events.jsonl"
         self.errors_log = self.log_dir / "errors.jsonl"
         self.reasoning_log = self.log_dir / "reasoning.jsonl"
-        
+
         # Setup standard logger
         self.logger = logging.getLogger("slack_agent")
         self.logger.setLevel(getattr(logging, log_level.upper()))
-        
-        # Console handler with clean formatting
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        console_handler.setFormatter(console_formatter)
-        self.logger.addHandler(console_handler)
-        
+
+        # Clear any existing handlers
+        self.logger.handlers = []
+
+        # Console handler with clean formatting (only if enabled)
+        if enable_console:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter(
+                '%(asctime)s | %(levelname)s | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+
         # File handler for detailed logs
         file_handler = logging.FileHandler(self.log_dir / "agent.log")
         file_handler.setLevel(logging.DEBUG)
@@ -264,9 +269,9 @@ class StructuredLogger:
 _logger: Optional[StructuredLogger] = None
 
 
-def get_logger(log_dir: str = "logs", log_level: str = "INFO") -> StructuredLogger:
+def get_logger(log_dir: str = "logs", log_level: str = "INFO", enable_console: bool = True) -> StructuredLogger:
     """Get or create the global logger instance."""
     global _logger
     if _logger is None:
-        _logger = StructuredLogger(log_dir=log_dir, log_level=log_level)
+        _logger = StructuredLogger(log_dir=log_dir, log_level=log_level, enable_console=enable_console)
     return _logger

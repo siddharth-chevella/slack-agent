@@ -4,7 +4,7 @@ Clarification Asker Node — Sends 1-2 focused questions to the user.
 Redesign principles:
   - Max 2 questions, always — enforced at LLM-prompt AND code level
   - Questions use the Alex persona: direct, human-phrased, like a Slack message
-  - Questions sourced from deep_reasoner's clarification_questions[] — already
+  - Questions sourced from deep_researcher's clarification_questions[] — already
     formatted as specific, complete questions
   - If reasoner supplied good questions, uses them directly (no second LLM call)
   - Falls back to LLM generation only if questions list is empty
@@ -139,6 +139,9 @@ Generate 1–2 clarifying questions about the USER'S specific setup or intent. R
 
         # Persist
         try:
+            processing_time = (datetime.now() - state["processing_start_time"]).total_seconds()
+            retrieval_queries = json.dumps(state.get("retrieval_history", [])) if state.get("retrieval_history") else None
+            retrieval_file_paths = json.dumps([f.path for f in state.get("research_files", [])]) if state.get("research_files") else None
             db.save_conversation(ConversationRecord(
                 id=None,
                 message_ts=state["message_ts"],
@@ -155,10 +158,12 @@ Generate 1–2 clarifying questions about the USER'S specific setup or intent. R
                 escalation_reason=None,
                 docs_cited=None,
                 reasoning_summary=state.get("reasoning_trace", ""),
-                processing_time=0.0,
+                processing_time=processing_time,
                 created_at=datetime.now(),
                 resolved=False,
                 resolved_at=None,
+                retrieval_queries=retrieval_queries,
+                retrieval_file_paths=retrieval_file_paths,
             ))
         except Exception:
             pass
