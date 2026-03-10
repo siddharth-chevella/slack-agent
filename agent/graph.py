@@ -1,20 +1,15 @@
 """
-LangGraph workflow for OLake Slack Community Agent.
+LangGraph workflow for OLake Slack Community Agent (production).
+
+Used by main.py in production and by test_agent.py for local testing — keep
+both in sync so test runs reflect prod behavior.
 
 Topology:
-  analyze_intent
-      → problem_decomposer          [NEW] breaks issue into queries & sub-questions
-      → build_context
-           └─ [org member in thread] → END silently
-      → retrieve_docs               [loops up to max_retrieval_iterations]
-      → deep_reasoning              [ANSWER | CLARIFY | RETRIEVE_MORE]
-           ├─ RETRIEVE_MORE (iterations < max) → retrieve_docs (loop)
-           ├─ RETRIEVE_MORE (iterations >= max) → solution or clarification
-           ├─ ANSWER  → solution
-           └─ CLARIFY → clarification
-      solution      → END
-      clarification → END
-      escalation    → END
+  build_context
+       └─ [org member in thread] → END silently
+  → deep_researcher                unified reasoning + retrieval (analyze → search → evaluate → dig)
+  → solution_provider | clarification | escalation | low_confidence_tagger
+  → END
 """
 
 from langgraph.graph import StateGraph, END
@@ -22,13 +17,12 @@ from typing import Literal
 
 from agent.state import ConversationState
 from agent.nodes.intent_analyzer import analyze_intent_sync
-from agent.nodes.problem_decomposer import problem_decomposer_sync
 from agent.nodes.context_builder import build_context
-from agent.nodes.doc_retriever import doc_retriever
-from agent.nodes.deep_reasoner import deep_reasoner_sync
+from agent.nodes.deep_researcher import deep_researcher
 from agent.nodes.solution_provider import solution_provider
 from agent.nodes.clarification_asker import clarification_asker_sync
 from agent.nodes.escalation_handler import escalation_handler
+from agent.nodes.low_confidence_tagger import low_confidence_tagger
 from agent.logger import get_logger
 
 
@@ -38,82 +32,40 @@ from agent.logger import get_logger
 
 def route_after_context(
     state: ConversationState,
-) -> Literal["retrieve_docs", "__end__"]:
+) -> Literal["deep_researcher", "__end__"]:
     """After context build: exit silently if an org member is in the thread."""
     if state.get("org_member_replied"):
         get_logger().logger.info("Org member in thread — bot staying silent.")
         return "__end__"
-    return "retrieve_docs"
+    return "deep_researcher"
 
 
-def route_after_reasoning(
+def route_after_research(
     state: ConversationState,
-) -> Literal["solution", "clarification", "escalation", "retrieve_docs"]:
+) -> Literal["solution", "clarification", "escalation", "low_confidence_tagger"]:
     """
-    Route after each deep_reasoning iteration.
-
-    RETRIEVE_MORE:
-      - RAG unavailable: skip loop (keyword fallback returns identical results)
-      - Iterations remaining: loop back to retrieve_docs
-      - Cap reached: fall through to solution or clarification
-    CLARIFY → clarification
-    ANSWER  → solution
+    Route after deep_researcher completes.
+    
+    The researcher either found enough context (→ solution) or needs clarification.
     """
-    decision    = state.get("reasoner_decision", "ANSWER").upper()
-    iterations  = state.get("retrieval_iterations", 0)
-    max_iters   = state.get("max_retrieval_iterations", 3)
-    confidence  = state.get("final_confidence", 0.0)
-    rag_up      = state.get("rag_service_available")  # None/True/False
-
     if state.get("should_escalate"):
         return "escalation"
-
-    if decision == "RETRIEVE_MORE":
-        # Only loop if RAG service is actually available — keyword fallback
-        # always returns the same results so looping wastes 40+ seconds.
-        if rag_up is not False and iterations < max_iters:
-            return "retrieve_docs"
-        # Cap reached or RAG is down
-        return "clarification" if confidence < 0.4 else "solution"
-
-    if decision == "CLARIFY":
+    
+    # Check if research found sufficient context
+    research_done = state.get("research_done", False)
+    confidence = state.get("research_confidence", 0.0)
+    files_found = len(state.get("research_files", []))
+    
+    # If confidence is too low, tag as low confidence
+    if confidence < 0.4 or files_found == 0:
+        return "low_confidence_tagger"
+    
+    # If researcher determined clarification is needed
+    if state.get("needs_clarification"):
         return "clarification"
-
+    
+    # Default to solution
     return "solution"
-
-
-# ---------------------------------------------------------------------------
-# Doc retriever wrapper that increments retrieval_iterations
-# and merges new search queries from the reasoner into the state
-# ---------------------------------------------------------------------------
-
-def retrieve_docs_with_counter(state: ConversationState) -> ConversationState:
-    """
-    Wraps doc_retriever to:
-      1. Merge new_search_queries (from deep_reasoner) into search_queries
-      2. Track all queries in retrieval_history to avoid re-querying the same thing
-      3. Increment retrieval_iterations counter
-    """
-    # Merge reasoner-requested queries into the active query set
-    new_qs = state.get("new_search_queries", [])
-    existing_qs = state.get("search_queries", [])
-    history = state.get("retrieval_history", [])
-
-    if new_qs:
-        # Prepend new queries so they take priority
-        merged = list(dict.fromkeys(new_qs + existing_qs))
-        state["search_queries"] = merged
-        state["new_search_queries"] = []
-
-    # Run actual retrieval
-    state = doc_retriever(state)
-
-    # Update retrieval accounting
-    state["retrieval_iterations"] = state.get("retrieval_iterations", 0) + 1
-    new_history = list(dict.fromkeys(history + state.get("search_queries", [])))
-    state["retrieval_history"] = new_history
-
-    return state
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +77,7 @@ def create_agent_graph() -> StateGraph:
     Build and compile the LangGraph agent workflow.
 
     Node sequence:
-      analyze_intent → problem_decomposer → build_context → retrieve_docs
-      → deep_reasoning → [route] → solution | clarification | escalation
-
-    The retrieve_docs ↔ deep_reasoning loop repeats up to max_retrieval_iterations.
+      build_context → deep_researcher → solution | clarification | escalation | low_confidence_tagger
     """
     logger = get_logger()
     logger.logger.info("Creating agent graph...")
@@ -136,49 +85,42 @@ def create_agent_graph() -> StateGraph:
     workflow = StateGraph(ConversationState)
 
     # ── Nodes ────────────────────────────────────────────────────────────
-    # workflow.add_node("analyze_intent",    analyze_intent_sync)
-    workflow.add_node("problem_decomposer", problem_decomposer_sync)
     workflow.add_node("build_context",     build_context)
-    workflow.add_node("retrieve_docs",     retrieve_docs_with_counter)
-    workflow.add_node("deep_reasoning",    deep_reasoner_sync)
+    workflow.add_node("deep_researcher",   deep_researcher)
     workflow.add_node("solution",          solution_provider)
     workflow.add_node("clarification",     clarification_asker_sync)
     workflow.add_node("escalation",        escalation_handler)
+    workflow.add_node("low_confidence_tagger", low_confidence_tagger)
 
     # ── Entry ─────────────────────────────────────────────────────────────
-    workflow.set_entry_point("problem_decomposer")
-
-    # ── Fixed edges ───────────────────────────────────────────────────────
-    # workflow.add_edge("analyze_intent",    "problem_decomposer")
-    workflow.add_edge("problem_decomposer", "build_context")
+    workflow.set_entry_point("build_context")
 
     # After context: exit silently if org member is in the thread
     workflow.add_conditional_edges(
         "build_context",
         route_after_context,
         {
-            "retrieve_docs": "retrieve_docs",
+            "deep_researcher": "deep_researcher",
             "__end__": END,
         },
     )
 
-    workflow.add_edge("retrieve_docs", "deep_reasoning")
-
-    # After reasoning: ANSWER / CLARIFY / loop RETRIEVE_MORE
+    # After research: route to solution, clarification, or low_confidence_tagger
     workflow.add_conditional_edges(
-        "deep_reasoning",
-        route_after_reasoning,
+        "deep_researcher",
+        route_after_research,
         {
-            "retrieve_docs": "retrieve_docs",   # loop
             "solution":      "solution",
             "clarification": "clarification",
             "escalation":    "escalation",
+            "low_confidence_tagger": "low_confidence_tagger",
         },
     )
 
     workflow.add_edge("solution",      END)
     workflow.add_edge("clarification", END)
     workflow.add_edge("escalation",    END)
+    workflow.add_edge("low_confidence_tagger", END)
 
     compiled = workflow.compile()
     logger.logger.info("Agent graph created successfully")

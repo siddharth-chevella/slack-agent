@@ -67,7 +67,8 @@ def build_context(state: ConversationState) -> ConversationState:
         state["user_profile"] = user_profile
 
         # ----------------------------------------------------------------
-        # Previous messages (cross-thread history for this user)
+        # Previous messages (cross-thread history for this user, for context)
+        # Capped at MAX_CONTEXT_MESSAGES (default 10) — that's why the count is often 10.
         # ----------------------------------------------------------------
         previous_messages = db.get_user_recent_messages(
             user_id=user_id,
@@ -92,17 +93,29 @@ def build_context(state: ConversationState) -> ConversationState:
                 limit=20,  # raised from 10 to get richer thread context
             )
 
-            existing_ts = {msg["message_ts"] for msg in thread_context}
+            existing_ts = {msg.get("message_ts") or msg.get("ts") for msg in thread_context}
             for slack_msg in slack_thread:
-                if slack_msg["ts"] not in existing_ts:
+                ts = slack_msg.get("ts")
+                if ts not in existing_ts:
                     thread_context.append(
                         {
-                            "message_ts": slack_msg["ts"],
+                            "message_ts": ts,
                             "user_id": slack_msg.get("user", ""),
                             "message_text": slack_msg.get("text", ""),
-                            "created_at": slack_msg["ts"],
+                            "created_at": ts,
                         }
                     )
+                    existing_ts.add(ts)
+
+            # Always include the current message (the one we're replying to) — it's not in DB or Slack yet
+            message_ts = state.get("message_ts") or state.get("ts", "")
+            if message_ts and message_ts not in existing_ts:
+                thread_context.append({
+                    "message_ts": message_ts,
+                    "user_id": user_id,
+                    "message_text": state.get("message_text", ""),
+                    "created_at": message_ts,
+                })
 
             # Annotate each thread message
             for msg in thread_context:
@@ -133,7 +146,7 @@ def build_context(state: ConversationState) -> ConversationState:
         logger.log_event(
             event_type=EventType.CONTEXT_LOADED,
             message=(
-                f"Loaded context: {len(previous_messages)} previous messages, "
+                f"Loaded context: {len(previous_messages)} previous messages (max {Config.MAX_CONTEXT_MESSAGES}), "
                 f"{len(thread_context)} thread messages, "
                 f"org_member_replied={org_member_replied}"
             ),

@@ -144,7 +144,44 @@ class Database:
                 ON documentation_lookups(query, created_at DESC)
             """)
             
-            self.logger.logger.info("Database initialized successfully")
+            # Migration: add retrieval columns to conversations if missing
+            try:
+                cursor.execute("PRAGMA table_info(conversations)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if "retrieval_queries" not in cols:
+                    cursor.execute("ALTER TABLE conversations ADD COLUMN retrieval_queries TEXT")
+                if "retrieval_file_paths" not in cols:
+                    cursor.execute("ALTER TABLE conversations ADD COLUMN retrieval_file_paths TEXT")
+            except Exception:
+                pass
+            
+            # DEBUG only: avoid cluttering console; this is SQLite persistence, not vectordb
+            self.logger.logger.debug("Persistence database (SQLite) ready")
+    
+    def save_documentation_lookup(
+        self,
+        query: str,
+        results: str,
+        relevance_score: Optional[float] = None,
+    ) -> int:
+        """
+        Persist a single retrieval batch (e.g. one round of queries and their results).
+        
+        Args:
+            query: JSON array of queries run, or single query string
+            results: JSON array of result items (e.g. [{"path", "relevance_score", "source"}])
+            relevance_score: Optional aggregate relevance for this batch
+            
+        Returns:
+            ID of inserted row
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO documentation_lookups (query, results, relevance_score)
+                VALUES (?, ?, ?)
+            """, (query, results, relevance_score))
+            return cursor.lastrowid
     
     def save_conversation(self, record: ConversationRecord) -> int:
         """
@@ -165,8 +202,9 @@ class Database:
                     intent_type, urgency, response_text, confidence,
                     needs_clarification, escalated, escalation_reason,
                     docs_cited, reasoning_summary, processing_time,
-                    created_at, resolved, resolved_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, resolved, resolved_at,
+                    retrieval_queries, retrieval_file_paths
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 record.message_ts,
                 record.thread_ts,
@@ -185,7 +223,9 @@ class Database:
                 record.processing_time,
                 record.created_at,
                 1 if record.resolved else 0,
-                record.resolved_at
+                record.resolved_at,
+                record.retrieval_queries,
+                record.retrieval_file_paths,
             ))
             
             return cursor.lastrowid

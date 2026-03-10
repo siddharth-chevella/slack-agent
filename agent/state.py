@@ -54,6 +54,18 @@ class RetrievedDocument:
 
 
 @dataclass
+class ResearchFile:
+    """A file retrieved during codebase research."""
+    path: str
+    content: str
+    matches: List[str]  # matching lines/snippets
+    relevance_score: float
+    source: str  # "ripgrep" | "ast-grep"
+    language: str
+    retrieval_reason: str  # Why this file was retrieved (small summary)
+
+
+@dataclass
 class ReasoningIteration:
     """A single iteration of the reasoning process."""
     iteration: int
@@ -69,8 +81,11 @@ class ReasoningIteration:
 class ConversationState(TypedDict):
     """
     State for the Slack community agent conversation graph.
-    
+
     This state is passed between nodes in the LangGraph workflow.
+
+    Note: CLI may set an optional key _cli_progress_callback (callable) for
+    live progress reporting; it is not part of the TypedDict and is not persisted.
     """
     # Slack event data
     event: Dict[str, Any]  # Raw Slack event
@@ -96,16 +111,28 @@ class ConversationState(TypedDict):
     retrieved_docs: List[RetrievedDocument]
     docs_relevance_score: float
 
-    # Problem decomposition (from problem_decomposer)
+    # Optional summary/signals (set by deep_researcher when present in LLM output)
     problem_summary: Optional[str]        # one-sentence restatement of the issue
-    sub_questions: List[str]              # decomposed sub-questions
-    is_ambiguous: bool                    # True if issue cannot be partially diagnosed
+    sub_questions: List[str]              # (unused; kept for compatibility)
+    is_ambiguous: bool                    # (unused; kept for compatibility)
+    is_conceptual: bool                   # True if question can be answered without code search
 
     # Iterative retrieval loop
     retrieval_iterations: int             # how many retrieval rounds have run
     max_retrieval_iterations: int         # cap (default 3)
     new_search_queries: List[str]         # queries from reasoner for next retrieval
     retrieval_history: List[str]          # all queries run so far (dedup across rounds)
+    retrieval_summaries: List[Dict[str, Any]]  # summary of what was retrieved each iteration
+
+    # Deep Research Agent
+    research_context: Dict[str, Any]      # accumulated research data
+    research_iterations: int              # how many research iterations completed
+    max_research_iterations: int          # cap for research iterations
+    thinking_log: List[str]               # Alex's thoughts per iteration
+    search_history: List[str]             # what was searched, why, and what was found (for next iteration)
+    research_files: List[ResearchFile]    # files found during research
+    research_done: bool                   # True when research is complete
+    research_confidence: float            # confidence in gathered context (0-1)
 
     # Reasoning process
     reasoning_iterations: List[ReasoningIteration]
@@ -156,6 +183,8 @@ class ConversationRecord:
     created_at: datetime
     resolved: bool
     resolved_at: Optional[datetime]
+    retrieval_queries: Optional[str] = None   # JSON array of queries run
+    retrieval_file_paths: Optional[str] = None  # JSON array of file paths retrieved
 
 
 @dataclass
@@ -208,16 +237,28 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         retrieved_docs=[],
         docs_relevance_score=0.0,
 
-        # Problem decomposition
+        # Optional summary/signals (deep_researcher may set)
         problem_summary=None,
         sub_questions=[],
         is_ambiguous=False,
+        is_conceptual=False,
 
         # Iterative retrieval
         retrieval_iterations=0,
         max_retrieval_iterations=3,
         new_search_queries=[],
         retrieval_history=[],
+        retrieval_summaries=[],
+
+        # Deep Research Agent
+        research_context={},
+        research_iterations=0,
+        max_research_iterations=5,
+        thinking_log=[],
+        search_history=[],
+        research_files=[],
+        research_done=False,
+        research_confidence=0.0,
 
         # Reasoning
         reasoning_iterations=[],

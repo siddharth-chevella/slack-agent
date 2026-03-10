@@ -1,11 +1,9 @@
 """
-RAG Service HTTP client for the Agent Service.
+RAG Service HTTP client — DEPRECATED for agent retrieval.
 
-Calls the RAG service REST API (POST /api/search_docs, /api/search_code, etc.)
-over httpx. Returns None if the service is unreachable (caller handles fallback).
-
-The MCP SSE endpoint (/mcp/sse) is also available for direct MCP tool calls
-(e.g. from Claude Desktop or future agent improvements using tool-calling LLMs).
+The agent uses ripgrep + ast-grep (CodebaseSearchEngine) only; no vectordb/RAG.
+This module is kept for optional external tooling (e.g. MCP). close_client() is
+safe to call and is a no-op if the client was never used.
 """
 
 from __future__ import annotations

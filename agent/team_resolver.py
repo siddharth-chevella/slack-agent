@@ -221,26 +221,10 @@ def format_escalation_message(
     issue_summary: str = "",
 ) -> str:
     """
-    Build the in-thread escalation message with proper @mentions.
+    Build the in-thread escalation message: only @mentions, no extra text.
     """
     if not targets:
         return "Flagging this for the OLake team — someone will assist shortly."
 
-    mention_parts = []
-    for t in targets:
-        mention = resolve_mention(t["slack_name"])
-        role_hint = f"_{t.get('desc', t.get('role', ''))}_ " if t.get("desc") else ""
-        mention_parts.append(f"{mention}\n{role_hint}")
-
-    header = f"Flagging this for the team — {' '.join(m for m in [resolve_mention(t['slack_name']) for t in targets])}"
-
-    lines = [header]
-    for t in targets:
-        desc = t.get("desc", t.get("role", ""))
-        if desc:
-            lines.append(f"_{desc}_")
-
-    if issue_summary:
-        lines.append(f"\n*Issue:* {issue_summary[:200]}")
-
-    return "\n".join(lines)
+    mentions = [resolve_mention(t["slack_name"]) for t in targets]
+    return " ".join(mentions)

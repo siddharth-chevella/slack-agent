@@ -123,6 +123,8 @@ def escalation_handler(state: ConversationState) -> ConversationState:
 
         processing_time = (datetime.now() - state["processing_start_time"]).total_seconds()
 
+        retrieval_queries = json.dumps(state.get("retrieval_history", [])) if state.get("retrieval_history") else None
+        retrieval_file_paths = json.dumps([f.path for f in state.get("research_files", [])]) if state.get("research_files") else None
         db.save_conversation(
             ConversationRecord(
                 id=None,
@@ -144,6 +146,8 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 created_at=state["processing_start_time"],
                 resolved=False,
                 resolved_at=None,
+                retrieval_queries=retrieval_queries,
+                retrieval_file_paths=retrieval_file_paths,
             )
         )
 
