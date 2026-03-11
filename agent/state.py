@@ -44,16 +44,6 @@ class UserProfile:
     
 
 @dataclass
-class RetrievedDocument:
-    """A retrieved documentation chunk."""
-    title: str
-    content: str
-    url: str
-    relevance_score: float
-    source_type: str  # "docs", "github", "stackoverflow", etc.
-
-
-@dataclass
 class ResearchFile:
     """A file retrieved during codebase research."""
     path: str
@@ -106,23 +96,15 @@ class ConversationState(TypedDict):
     key_topics: List[str]
     technical_terms: List[str]
     
-    # Documentation search
-    search_queries: List[str]
-    retrieved_docs: List[RetrievedDocument]
-    docs_relevance_score: float
-
     # Optional summary/signals (set by deep_researcher when present in LLM output)
     problem_summary: Optional[str]        # one-sentence restatement of the issue
     sub_questions: List[str]              # (unused; kept for compatibility)
     is_ambiguous: bool                    # (unused; kept for compatibility)
     is_conceptual: bool                   # True if question can be answered without code search
 
-    # Iterative retrieval loop
-    retrieval_iterations: int             # how many retrieval rounds have run
-    max_retrieval_iterations: int         # cap (default 3)
-    new_search_queries: List[str]         # queries from reasoner for next retrieval
-    retrieval_history: List[str]          # all queries run so far (dedup across rounds)
-    retrieval_summaries: List[Dict[str, Any]]  # summary of what was retrieved each iteration
+    # OLake context (summarised for this turn by olake_context_summariser when used)
+    about_olake_summary: Optional[str]   # focused excerpt of ABOUT_OLAKE for this query; else full ABOUT_OLAKE
+    relevant_repos: Optional[List[str]]  # repo names to prefer for this question (e.g. ["olake", "olake-docs"])
 
     # Deep Research Agent
     research_context: Dict[str, Any]      # accumulated research data
@@ -132,7 +114,7 @@ class ConversationState(TypedDict):
     search_history: List[str]             # what was searched, why, and what was found (for next iteration)
     research_files: List[ResearchFile]    # files found during research
     research_done: bool                   # True when research is complete
-    research_confidence: float            # confidence in gathered context (0-1)
+    research_confidence: float            # confidence in gathered context (0-1); used for routing
 
     # Reasoning process
     reasoning_iterations: List[ReasoningIteration]
@@ -153,7 +135,6 @@ class ConversationState(TypedDict):
     # Org-member guard
     org_member_replied: bool  # True when an org team member is in the thread → bot silences
     doc_sufficient: bool       # True when retrieved docs score above DOCS_ANSWER_THRESHOLD
-    rag_service_available: Optional[bool]  # None=unknown, True=up, False=using keyword fallback
     # Metadata
     processing_start_time: datetime
     processing_end_time: Optional[datetime]
@@ -232,23 +213,11 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         key_topics=[],
         technical_terms=[],
         
-        # Documentation search
-        search_queries=[],
-        retrieved_docs=[],
-        docs_relevance_score=0.0,
-
         # Optional summary/signals (deep_researcher may set)
         problem_summary=None,
         sub_questions=[],
         is_ambiguous=False,
         is_conceptual=False,
-
-        # Iterative retrieval
-        retrieval_iterations=0,
-        max_retrieval_iterations=3,
-        new_search_queries=[],
-        retrieval_history=[],
-        retrieval_summaries=[],
 
         # Deep Research Agent
         research_context={},
@@ -279,8 +248,7 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         # Org-member guard
         org_member_replied=False,
         doc_sufficient=False,
-        rag_service_available=None,
-
+        
         # Metadata
         processing_start_time=datetime.now(),
         processing_end_time=None,

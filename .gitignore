@@ -100,6 +100,7 @@ desktop.ini
 # =========================
 *.sqlite3
 *.db
+data
 
 # =========================
 # Misc
@@ -111,3 +112,6 @@ desktop.ini
 # docs
 *.md
 .github_repos
+
+# Internal test scripts
+r.py

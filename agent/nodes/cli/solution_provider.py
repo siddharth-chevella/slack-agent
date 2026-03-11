@@ -15,7 +15,7 @@ from agent.state import ConversationState, ConversationRecord
 from agent.persistence import get_database
 from agent.logger import get_logger
 from agent.llm import get_chat_completion
-from agent.config import OLAKE_CONTEXT
+from agent.config import ABOUT_OLAKE
 
 _PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
@@ -28,10 +28,10 @@ def _looks_truncated(text: str) -> bool:
     return bool(stripped) and not stripped.endswith(_SENTENCE_ENDINGS)
 
 
-_ALEX_SYSTEM = f"""You are Alex, a senior support engineer on the OLake/Datazip team. You answer as part of OLake — use "we" and "our". Never refer to OLake as "they" or "their."
+_ALEX_SYSTEM_TEMPLATE = """You are Alex, a senior support engineer on the OLake/Datazip team. You answer as part of OLake — use "we" and "our". Never refer to OLake as "they" or "their."
 
 About OLake:
-{OLAKE_CONTEXT.strip()}
+{about_olake}
 
 Important: OLake is one product (data ingestion to Iceberg). Do not say "our tools" (plural). Say "OLake" or "we" (e.g. "We focus on…", "OLake doesn't support X").
 
@@ -44,6 +44,11 @@ Voice and grounding:
 Tone: Professional and human. Lead with the answer. Use "you/your". No generic openers or "Let me know if you have further questions." One emoji max. Under 300 words.
 
 Return the final message text only — no JSON, no markdown wrapper."""
+
+
+def _alex_system(state: ConversationState) -> str:
+    about = (state.get("about_olake_summary") or ABOUT_OLAKE).strip()
+    return _ALEX_SYSTEM_TEMPLATE.format(about_olake=about)
 
 
 def _build_doc_citations(docs: list) -> str:
@@ -96,6 +101,7 @@ async def _polish_answer(
     confidence: float,
     problem_summary: str,
     is_conceptual: bool = False,
+    state: ConversationState | None = None,
 ) -> str:
     """Optional LLM polish pass."""
     file_context = ""
@@ -127,9 +133,10 @@ Confidence: {confidence:.0%}
 
 Write the final reply. Start with the answer — no preamble."""
 
+    system = _alex_system(state) if state else _ALEX_SYSTEM_TEMPLATE.format(about_olake=ABOUT_OLAKE.strip())
     response = await get_chat_completion(
         messages=[
-            {"role": "system", "content": _ALEX_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
@@ -169,6 +176,7 @@ def cli_solution_provider(state: ConversationState) -> ConversationState:
                     confidence=confidence,
                     problem_summary=problem_summary,
                     is_conceptual=is_conceptual,
+                    state=state,
                 ))
             except Exception as polish_err:
                 logger.logger.warning(f"[CLISolutionProvider] Polish LLM call failed: {polish_err}. Using fallback.")

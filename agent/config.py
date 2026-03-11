@@ -24,6 +24,8 @@ class Config:
     OPENROUTER_API_KEY: Optional[str] = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-4.6-sonnet")
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
     
     # Slack
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
@@ -100,6 +102,10 @@ class Config:
 
         if cls.LLM_PROVIDER == "openrouter" and not cls.OPENROUTER_API_KEY:
             errors.append("OPENROUTER_API_KEY is required when using OpenRouter")
+
+        if cls.LLM_PROVIDER == "ollama":
+            # No API key required; ensure base URL is set (default: http://localhost:11434/v1)
+            pass
         
         if errors:
             for error in errors:
@@ -136,7 +142,7 @@ class Config:
 
 
 # OLake Context (for LLM)
-OLAKE_CONTEXT = """
+ABOUT_OLAKE = """
 OLake: Comprehensive Technical Research Report
 Open-Source Database Replication to Apache Iceberg
 March 2026 | Based on olake.io & github.com/datazip-inc/olake
@@ -324,33 +330,17 @@ For development and smaller workloads, OLake provides a single Docker Compose fi
 OLake can also be orchestrated by Apache Airflow for teams already invested in that ecosystem. Airflow DAGs can invoke OLake's CLI commands (sync, discover, etc.) on a schedule. There are documented deployment patterns for both Airflow-on-EC2 and Airflow-on-Kubernetes configurations.
 
 ================================================================================
-6. KEY DIFFERENTIATORS VS. ALTERNATIVES
+6. KNOWN LIMITATIONS & SCOPE BOUNDARIES
 ================================================================================
-
-The most important differentiator is what OLake does not require. Traditional CDC setups using Debezium require standing up and operating a Kafka cluster as an intermediary message broker. This adds significant operational overhead: Kafka brokers, Zookeeper or KRaft, Kafka Connect workers, schema registries, connector configurations, consumer group management, and monitoring all of that infrastructure. OLake eliminates this entirely by reading directly from the database's native log protocol and writing directly to object storage.
-
-Compared to Debezium + Kafka: OLake needs no broker, is Go-native vs. Java/Kafka, reads native DB logs vs. routing through Kafka, delivers 235K RPS vs. ~15K RPS (14.8x faster), and handles schema evolution automatically vs. requiring a Kafka schema registry.
-
-Compared to Airbyte: OLake has native, first-class Iceberg support vs. limited/third-party support, uses a direct CDC path vs. Airbyte's polling or limited CDC, is significantly faster on full loads, and has no per-connector Python runtime overhead.
-
-Compared to Fivetran: OLake incurs only infrastructure cost vs. Fivetran's per-row pricing, delivers faster performance in benchmarks, produces zero vendor lock-in via open formats, and can be self-hosted on any cloud or on-premises infrastructure.
-
-================================================================================
-7. KNOWN LIMITATIONS & SCOPE BOUNDARIES
-================================================================================
-
-Understanding what OLake intentionally does not do is as important as understanding what it does.
-
-Snapshot lifecycle management (vacuuming old Iceberg snapshots) is outside OLake's scope — this is handled at the query engine level using procedures like expire_snapshots in Spark, Trino, or Flink. OLake writes into Iceberg; maintenance of the table's history is the operator's responsibility.
 
 OLake is an ELT tool — it replicates raw data as-is. Transformations such as business logic, aggregations, and joins are expected to happen downstream using the query engine of choice (dbt + Spark/Trino, etc.).
 
 Oracle support currently covers Full Refresh and Incremental Sync but not CDC via LogMiner. Full CDC for Oracle is on the roadmap.
 
-MSSQL, DB2, and S3 sources are in development and not yet production-ready. Delta Lake and Apache Hudi are planned destinations but not currently supported — Iceberg is the primary format. The Java gRPC Iceberg writer is currently a single process, which could become a bottleneck at extreme scale, though the 10K-record batching and large-file commit strategy mitigates this significantly.
+Delta Lake and Apache Hudi are planned destinations but not currently supported — Iceberg is the primary format. The Java gRPC Iceberg writer is currently a single process, which could become a bottleneck at extreme scale, though the 10K-record batching and large-file commit strategy mitigates this significantly.
 
 ================================================================================
-8. CODEBASE STRUCTURE & ENGINEERING OBSERVATIONS
+7. CODEBASE STRUCTURE & ENGINEERING OBSERVATIONS
 ================================================================================
 
 The OLake codebase at github.com/datazip-inc/olake is organized around a clear directory structure. The drivers/ directory contains one subdirectory per source connector (postgres/, mysql/, mongodb/, oracle/, kafka/), each with a main.go entry point and an internal/ package for the connector logic. The writers/ directory holds destination implementations (iceberg/, parquet/). The protocol/ directory defines the core interfaces (Connector, Driver, Writer, WriterPool, ThreadEvent) and the sync orchestration logic. The types/ directory houses OLake's internal type system, schema representation, RawRecord, Chunk, and State definitions. The utils/ directory holds shared utilities including the concurrent execution primitives (Concurrent, ConcurrentInGroup, CGroupWithLimit). The waljs/ directory contains the PostgreSQL WAL parsing library wrapping pglogrepl.
@@ -360,21 +350,7 @@ Each driver is built as a separate binary (driver-postgres, driver-mysql, etc.) 
 The concurrency primitives in utils/ are worth noting. OLake uses Go's native goroutines and channels rather than any external concurrency library. The CGroupWithLimit type is a custom implementation of a bounded concurrency group backed by golang.org/x/sync/errgroup, extended with a semaphore for limiting simultaneous goroutines.
 
 ================================================================================
-9. PRIMARY USE CASES
-================================================================================
-
-Real-Time Data Lakehouse: The core use case — replicating transactional databases (Postgres, MySQL, MongoDB) into an Apache Iceberg lakehouse on S3 or compatible object storage, enabling analysts to query with Athena, Trino, or Spark without impacting the operational database.
-
-ML Feature Stores & Training Data: OLake's continuous CDC replication keeps feature stores and training datasets current. Iceberg's compatibility with PySpark and DuckDB makes it easy to plug OLake's output directly into ML workflows.
-
-Data Warehouse Modernization: Organizations migrating from proprietary data warehouses to open lakehouses can use OLake to stream data from operational databases into Iceberg tables, then layer their preferred query engine on top without being locked into a single vendor's storage format.
-
-Replacing DIY CDC Stacks: Teams currently operating Debezium + Kafka + Kafka Connect pipelines incur significant operational overhead. OLake replaces the entire stack with a single binary and a few JSON config files, while delivering better throughput.
-
-Open-Source Alternative to Managed ELT: Fivetran and similar managed services charge per row synced, which becomes expensive at scale. OLake, deployed on a team's own Kubernetes cluster, incurs only compute and storage costs — and benchmarks show it outperforms Fivetran on speed as well.
-
-================================================================================
-10. COMMUNITY & ECOSYSTEM
+8. COMMUNITY & ECOSYSTEM
 ================================================================================
 
 OLake is maintained by Datazip and has an active open-source community. The project accepts contributions via GitHub (github.com/datazip-inc/olake), has a Slack community for real-time support, and runs a community contributor program. The project has participated in Google Summer of Code (GSoC). Documentation is maintained separately at github.com/datazip-inc/olake-docs.
@@ -382,18 +358,79 @@ OLake is maintained by Datazip and has an active open-source community. The proj
 The project uses a standard open-source contribution model with issue templates for bug reports and doc errors, PR review guidelines, and a Code of Conduct. A dedicated testing framework is included for writing sync tests and connection checks across different database flavors.
 
 ================================================================================
-11. SUMMARY ASSESSMENT
-================================================================================
-
-OLake is a technically sophisticated, performance-first open-source tool that fills a genuine gap in the data engineering ecosystem. For teams building Apache Iceberg-based lakehouses who need reliable, fast CDC replication from common operational databases — without the operational overhead of a Kafka/Debezium stack — OLake is the most compelling open-source option currently available.
-
-Its architectural decisions are coherent and well-reasoned: Go for the data plane (concurrency, speed, low memory), Java only where necessary (Iceberg native API), Apache Arrow for in-memory efficiency, direct database log reading (no middleware), and parallelized chunking with chunk-level state tracking for resumability. The benchmark numbers are impressive but should be evaluated in context — they represent best-case conditions on well-resourced Azure infrastructure.
-
-The main areas to watch are Oracle CDC support (currently missing), the single Java gRPC writer potentially becoming a bottleneck at extreme scale, and the maturity of the MSSQL/DB2/S3 connectors still in development. For teams whose source databases are primarily PostgreSQL, MySQL, or MongoDB and whose destination is Apache Iceberg, OLake is production-ready and worth serious consideration.
-
-================================================================================
 Sources: olake.io/docs | olake.io/blog | github.com/datazip-inc/olake | olake.io/docs/benchmarks
 ================================================================================
+"""
+
+# Repo Info
+ABOUT_OLAKE_REPO_INFO = """
+Below are the repositories that make up OLake:
+
+=== olake (Core Engine) ===
+Language: Go
+The central runtime that does all actual data movement. Contains:
+- Source connectors/drivers: PostgreSQL (pgoutput CDC), MySQL (binlog CDC), MongoDB (oplog CDC),
+  Oracle, MSSQL, DB2, Kafka, S3
+- Destination writers: Apache Iceberg (REST/Glue/Hive catalogs), Parquet files
+- Core sync logic: full load, incremental, and CDC (change data capture) modes
+- Schema discovery, schema evolution handling, type mapping
+- CLI entrypoint for running sync jobs (used directly or invoked by olake-ui's BFF)
+- Internal libraries/interfaces shared across connectors (state management, record batching,
+  checkpointing, parallelism)
+- CI/CD pipelines, integration tests, Docker image builds (image consumed by olake-ui and olake-helm)
+
+=== olake-ui (Frontend + BFF) ===
+Languages: TypeScript (React frontend), Go (BFF/API backend)
+The user-facing control plane for OLake. Contains:
+- React frontend: dashboard for managing sources, destinations, jobs, sync runs, logs
+- BFF (Backend for Frontend): REST API that stores job/source/destination configurations in
+  PostgreSQL, triggers and monitors sync jobs via Temporal workflow engine
+- Temporal worker code that invokes olake (core engine) Docker image to actually run syncs
+- Docker Compose setup to run the full stack (UI + BFF + Temporal + PostgreSQL)
+- Auth layer (user login, session management)
+Connection to others: Directly orchestrates olake (core) by spawning its Docker container per
+sync job. olake-helm deploys this service to Kubernetes. olake-docs documents how to set it up.
+
+=== olake-docs (Documentation & Website) ===
+Language: MDX/JavaScript (Docusaurus)
+The public-facing website at olake.io. Contains:
+- Full user documentation: quickstart guides, connector-specific setup (Postgres, MySQL, MongoDB,
+  Iceberg, S3, etc.), configuration references, CLI flag references
+- Architecture explanations, CDC concepts, benchmarks, performance comparisons
+- Blog posts and announcements
+- Changelog and migration guides
+- No runtime code; purely static content
+Connection to others: Documents all features of olake (core) and olake-ui. References olake-helm
+for Kubernetes deployment instructions.
+
+=== olake-helm (Kubernetes Deployment) ===
+Language: YAML (Helm)
+Kubernetes deployment manifests for the entire OLake stack. Contains:
+- Helm chart(s) for deploying olake-ui (frontend + BFF), Temporal, PostgreSQL, and the sync
+  worker infrastructure on a Kubernetes cluster
+- values.yaml with configurable resource limits, replica counts, image tags, secrets
+- Templates for Deployments, Services, Ingress, ConfigMaps, PersistentVolumeClaims
+- Likely references the same Docker images built and published by olake and olake-ui repos
+Connection to others: Packages and deploys olake-ui and the olake core worker image; the
+Kubernetes-native alternative to the Docker Compose setup in olake-ui.
+
+=== olake-fusion (Lakehouse Management Layer) ===
+Language: Java
+Base: Fork/customization of Apache Amoro (incubating)
+A lakehouse management system built on open table formats (Iceberg, etc.). Contains:
+- Table optimization services: compaction, expiry, orphan file cleanup for Iceberg tables
+- Catalog management: unified interface over multiple Iceberg catalogs (REST, Hive, Glue, etc.)
+- AMS (Amoro Management Service): web UI and API for monitoring and managing lakehouse tables
+- Iceberg table health metrics, partitioning strategies, self-optimizing table features
+Connection to others: Sits downstream of olake (core) — after olake writes data into Iceberg
+tables, olake-fusion manages and optimizes those tables. It is the lakehouse governance/maintenance
+layer that complements the ingestion done by the core engine.
+
+=== Inter-repo Relationships Summary ===
+olake (core) ← invoked by → olake-ui (BFF orchestrates core's Docker image per sync job)
+olake (core) → writes Iceberg tables → olake-fusion (manages/optimizes those tables)
+olake + olake-ui → packaged for K8s by → olake-helm
+olake + olake-ui + olake-helm → documented in → olake-docs
 """
 
 
@@ -406,7 +443,7 @@ def load_olake_docs() -> str:
         about_path = Path("docs/about_olake.md")
         if about_path.exists():
             return about_path.read_text()
-        return OLAKE_CONTEXT
+        return ABOUT_OLAKE
     
     # If we have a knowledge base directory, load all markdown files
     all_docs = []
@@ -416,7 +453,7 @@ def load_olake_docs() -> str:
         except Exception:
             continue
     
-    return "\n".join(all_docs) if all_docs else OLAKE_CONTEXT
+    return "\n".join(all_docs) if all_docs else ABOUT_OLAKE
 
 
 # Validate on import

@@ -191,12 +191,10 @@ class GitHubRepoTracker:
             log.info(f"Repository '{name}' not found, cloning...")
             return self.clone_repo(name)
         
-        # Pull latest changes
-        cmd = f"cd {repo_path} && git pull"
-        
-        log.info(f"Syncing {name}: {cmd}")
-        
-        result = self.terminal.execute(cmd)
+        # Pull latest changes (use working_dir to avoid command chaining in guardrails)
+        cmd = "git pull"
+        log.info(f"Syncing {name}: {cmd} (in {repo_path})")
+        result = self.terminal.execute(cmd, working_dir=repo_path)
         
         if result.success:
             repo.last_sync = datetime.now()

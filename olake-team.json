@@ -2,27 +2,27 @@
     "Engineering": {
         "shubham": {
             "role": "CTO",
-            "desc": "POC especially for major issues."
+            "desc": "POC especially for major, critical, and adoption related issues."
         },
         "Ankit Sharma": {
             "role": "Tech Lead",
-            "desc": "Second POC for any generic tech issues, especially adoption issues."
+            "desc": "POC for legacy iceberg writer issues or compaction related issues"
         },
         "VIKASH CHOUDHARY": {
             "role": "Backend Engineer",
-            "desc": "Anything related to CDC should be raised to him"
+            "desc": "POC for CDC related issues"
         },
         "Badal": {
             "role": "Backend Engineer",
-            "desc": "Anything related to arrow writer is handled by him"
+            "desc": "POC for arrow writer related issues or compaction related issues. He wrote compaction api contracts"
         },
         "Vishal M": {
             "role": "Backend Engineer",
-            "desc": "Anything related to MSSQL is handled by him"
+            "desc": "POC for MSSQL related issues"
         },
         "Deepanshu Pal": {
             "role": "Frontend Engineer",
-            "desc": "Any frontend issues is handled by him"
+            "desc": "POC for frontend related issues"
         }
     },
     "DevOps": {
