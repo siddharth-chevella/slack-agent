@@ -2,10 +2,11 @@
 LangGraph workflow for CLI mode.
 
 Simplified topology without Slack dependencies:
-  cli_context_builder → olake_context_summariser → deep_researcher → relevance_filter → cli_solution_provider → END
+  cli_context_builder → olake_context_summariser → (needs_codebase_search? deep_researcher → relevance_filter : direct) → solution → END
 """
 
 from langgraph.graph import StateGraph, END
+from typing import Literal
 
 from agent.state import ConversationState
 from agent.nodes.olake_context_summariser import summarise_olake_context
@@ -18,6 +19,15 @@ from agent.nodes.cli import (
 from agent.logger import get_logger
 
 
+def route_after_summariser(
+    state: ConversationState,
+) -> Literal["deep_researcher", "solution"]:
+    """If question needs codebase search go to deep_researcher, else directly to solution."""
+    if state.get("needs_codebase_search", True):
+        return "deep_researcher"
+    return "solution"
+
+
 # ---------------------------------------------------------------------------
 # Graph factory
 # ---------------------------------------------------------------------------
@@ -27,7 +37,7 @@ def create_cli_agent_graph() -> StateGraph:
     Build and compile the LangGraph agent workflow for CLI mode.
 
     Node sequence:
-      cli_context_builder → deep_researcher → relevance_filter → solution
+      cli_context_builder → olake_context_summariser → (deep_researcher → relevance_filter) or direct → solution
     """
     logger = get_logger()
     logger.logger.info("Creating CLI agent graph...")
@@ -44,11 +54,17 @@ def create_cli_agent_graph() -> StateGraph:
     # ── Entry ─────────────────────────────────────────────────────────────
     workflow.set_entry_point("cli_context_builder")
 
-    # After context: summarise OLake context for this query, then research
     workflow.add_edge("cli_context_builder", "olake_context_summariser")
-    workflow.add_edge("olake_context_summariser", "deep_researcher")
+    workflow.add_conditional_edges(
+        "olake_context_summariser",
+        route_after_summariser,
+        {
+            "deep_researcher": "deep_researcher",
+            "solution": "solution",
+        },
+    )
 
-    # After research: filter relevance, then always to solution (answer/clarify/escalate)
+    # After research: filter relevance, then to solution
     workflow.add_edge("deep_researcher", "relevance_filter")
     workflow.add_edge("relevance_filter", "solution")
     workflow.add_edge("solution", END)

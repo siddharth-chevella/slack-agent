@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 # System Prompt — Optimized for ripgrep + ast-grep (no vector/semantic search)
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT_TEMPLATE = """You are Alex, a senior support engineer at OLake/Datazip.
+_SYSTEM_PROMPT_TEMPLATE = """You are Alex, a senior support engineer at OLake/Datazip. Think and reason explicitly in first person: use "I" in your reasoning (e.g. "I need to search for ...", "I will look for ...", "I should target ...").
 
 About OLake:
 {about_olake}
@@ -40,10 +40,12 @@ Repositories available for search (each is searched individually; use this to ta
 
 Your job: Research the codebase using ONE search tool with standardized parameters (SearchParams). There is NO vector search, NO semantic search, NO keyword embedding. Results come only from literal text matches and structural code patterns.
 
+PREFER REGEX, ONE SEARCH PER REPO: Use regex as the pattern to match all related terms in a single search per repo instead of multiple iterations on the same repo. Combine identifiers with | (OR), e.g. "ExpireSnapshot|expireSnapshot|ExpireSnapshots|retention", so one SearchParams per repo gathers all relevant hits at once. Avoid running several separate searches on the same repo—express everything you need for that repo in one regex pattern.
+
 HOW THE TOOL WORKS:
 The search tool accepts a SearchParams object and routes internally to either ripgrep (text/regex) or ast-grep (code structure). You control which by how you phrase the pattern:
-- TEXT/REGEX patterns: literal strings or regex that would appear in source files. Use for: identifiers (ExpireSnapshot, expire_snapshots), config keys (snapshot.retention), error strings, package names, comments.
-- STRUCTURAL patterns: code-like snippets for finding definitions/usages. Use for: "func ExpireSnapshot" (Go), "type SnapshotManager", "class Foo". Primary language for OLake is Go.
+- REGEX patterns (preferred): Use regex to match multiple variants in one go. Examples: "ExpireSnapshot|expireSnapshot|ExpireSnapshots", "snapshot\\.retention|retention_days", "topic.*retention|topic_retention", "func.*Snapshot|type.*Snapshot". Ripgrep supports full regex; use it to cover a whole topic in one search per repo.
+- STRUCTURAL patterns: code-like snippets for definitions/usages when needed. Use for: "func ExpireSnapshot" (Go), "type SnapshotManager". Primary language for OLake is Go.
 
 SearchParams fields:
 - pattern: the search string (literal, regex, or structural code snippet)
@@ -61,7 +63,7 @@ PATTERN QUALITY RULES (apply to all patterns regardless of tool):
 - Weak patterns match many unrelated areas; strong patterns stay domain-relevant
 - Examples of weak vs strong:
     WEAK "partition" → matches Kafka partitions, drivers, tests, unrelated code
-    STRONG "partition_regex", "partition regex" → scoped to the actual feature
+    STRONG "PartitionRegex", "partition_regex" → scoped to the actual feature
 
     WEAK "retention" → matches snapshot retention, logs, many modules
     STRONG "topic.*retention", "topic_retention" → scoped to topic config
@@ -70,19 +72,19 @@ PATTERN QUALITY RULES (apply to all patterns regardless of tool):
     STRONG "wal.*lag", "pgoutput.*lag", "replication.*lag" → scoped to CDC/Postgres
 
 STRATEGY:
-- Start with 2-4 patterns targeting identifiers, config keys, or error strings from the question.
-- Add 1-2 structural patterns (func/type definitions) to find implementations.
+- Use regex to combine related terms (identifiers, config keys, error strings) into one pattern per repo so a single search covers the topic.
+- Prefer one SearchParams per repo with a regex like "TermA|termA|TermB|termB" over multiple SearchParams on the same repo.
 - Use SEARCH HISTORY to avoid repeating failed searches.
-- If the user asks "how do I X?", think: what function or config implements X?
-- If the user asks "where is Y?", use Y and related identifiers (YManager, NewY).
+- If the user asks "how do I X?", think: what function or config implements X? Put all related names in one regex for that repo.
+- If the user asks "where is Y?", use Y and related identifiers (YManager, NewY) in one regex per repo.
 
 OUTPUT FORMAT (valid JSON only, no markdown fences):
 {{
-  "thinking": "Your reasoning: what you need and why these patterns",
-  "search_intent": "One or two lines: what you are searching and why.",
+  "thinking": "First-person reasoning: e.g. I need to search for ... ; I will use this regex because ...",
+  "search_intent": "One or two lines: what you are searching and why (can use I).",
   "search_params": [
     {{
-      "pattern": "ExpireSnapshot",
+      "pattern": "ExpireSnapshot|expireSnapshot|ExpireSnapshots|retention",
       "repo": "olake",
       "max_results": 50,
       "file_types": ["go"],
@@ -97,8 +99,8 @@ OUTPUT FORMAT (valid JSON only, no markdown fences):
 
 RULES:
 - search_intent is REQUIRED every time: 1-2 lines on what you're searching and why.
-- Max 5 SearchParams objects per iteration.
-- Patterns must be strings that could literally appear in source (text) or structural code snippets (ast-style). No full sentences or questions.
+- Prefer richer regex so one pattern covers many related matches per repo — e.g. "(snapshot|retention)[_.]?\\w*\\s*[:=]" matches config keys (snapshot_retention, retention_days, snapshot.retention) at assignment or definition sites in one search; use grouping, optional parts ([_.]?), and character classes (\\w, \\s) to capture variants without listing every token. Max 5 SearchParams per iteration (ideally one per repo).
+- Patterns must be valid regex or structural code snippets. No full sentences or questions.
 - If you already have sufficient findings, output empty search_params [] to signal readiness to evaluate.
 - Set is_conceptual to true only for general-knowledge questions (e.g. "What is OLake?") that need no code search; then leave search_params empty.
 """
@@ -108,14 +110,38 @@ def _system_prompt(about_olake: str, about_olake_repo_info: str = "") -> str:
     repo_info = (about_olake_repo_info or ABOUT_OLAKE_REPO_INFO or "").strip()
     return _SYSTEM_PROMPT_TEMPLATE.format(about_olake=about_olake, about_olake_repo_info=repo_info)
 
+# Prompt for file summarization (LLM summarizes each file; no truncation).
+# The files are passed to this prompt in the USER message: for each file we send path, pattern used for retrieval, and full content (see _build_files_summary).
+_SUMMARIZE_FILES_SYSTEM = """You summarize codebase files so an evaluator can decide if enough context exists to answer a user question.
+
+About OLake:
+{about_olake}
+
+Repositories (for context):
+{about_olake_repo_info}
+
+RULES:
+1. Understand the USER QUESTION intent first. Use it to decide whether each file is relevant. If a file is irrelevant to the question, do NOT include it in your output (skip it).
+2. For each relevant file, output file_path and a concise descriptive summary in bullet points. Example format:
+   - What the file does (e.g. "Validates JWT tokens using Clerk (jose library)")
+   - Key behavior (e.g. "Middleware applied globally except /public/* routes")
+   - Important details (e.g. "On failure: returns 401, logs to Sentry with user_id")
+   - Dependencies if clear (e.g. "Depends on: config/env.py (CLERK_SECRET_KEY)")
+3. Every sentence MUST be grounded in the file content or the question. Do NOT guess or make up information. If you are unsure about something, state it clearly (e.g. "Unclear whether...").
+4. You receive the full file content (no truncation). Base your summary only on what is actually in the file.
+
+OUTPUT FORMAT: Return ONLY a single JSON object. No markdown, no trailing backticks, no explanation before or after. Valid JSON only:
+{{"summaries": [{{"file_path": "<path>", "summary": "<bullet summary>"}}, ...]}}
+
+Omit any file that is irrelevant to the user question from the summaries array."""
+
 # Prompt for post-search evaluation: analyze retrieved data and decide if enough to answer
 _EVALUATE_PROMPT = """You are evaluating whether the retrieved codebase context is enough to answer the user's question accurately.
 
 USER QUESTION: "{message_text}"
 
-FILES FOUND (path, why retrieved, and a snippet):
+FILES FOUND (path and concise summary per file):
 {files_summary}
-
 
 Analyze the retrieved data: Does it contain the right modules, config, or docs to answer the question? If key info is missing or the files are from the wrong domain, say CONTINUE so the agent can search again with a better target.
 
@@ -133,6 +159,27 @@ Reply with JSON only (no markdown):
 
 _PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.DOTALL)
 
+# Summarizer: max total content chars per LLM call (avoid context overflow); batch size when batching
+_SUMMARIZE_MAX_CHARS = 80_000
+_SUMMARIZE_BATCH_SIZE = 5
+
+
+def _parse_summarizer_json(text: str | None) -> List[Dict[str, Any]]:
+    """Parse summarizer LLM response: expect JSON only (no markdown fences). Returns list of {file_path, summary}."""
+    if not text or not text.strip():
+        return []
+    raw = text.strip()
+    # Remove common wrappers: ```json ... ``` or ``` ... ```
+    raw = _PARSE_RE_FENCE.sub("", raw).strip()
+    try:
+        obj = json.loads(raw)
+        summaries = obj.get("summaries")
+        if isinstance(summaries, list):
+            return [{"file_path": str(s.get("file_path", "")), "summary": str(s.get("summary", ""))} for s in summaries]
+        return []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
 
 def _parse_json(text: str | None) -> dict:
     """Parse LLM JSON with progressive fallbacks for truncated responses."""
@@ -146,6 +193,49 @@ def _parse_json(text: str | None) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+
+    # 1b. Prose-then-JSON: find first { and parse a single JSON object from there (H1)
+    first_brace = text.find("{")
+    if first_brace >= 0:
+        # Find matching closing brace; skip content inside double-quoted strings (JSON uses ")
+        depth = 0
+        i = first_brace
+        end = -1
+        in_double = False
+        escape = False
+        while i < len(text):
+            c = text[i]
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if in_double:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_double = False
+                i += 1
+                continue
+            if c == '"':
+                in_double = True
+                i += 1
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+            i += 1
+        if end >= 0:
+            json_slice = text[first_brace : end + 1]
+            try:
+                obj = json.loads(json_slice)
+                if isinstance(obj, dict) and ("search_params" in obj or "thinking" in obj or "search_intent" in obj):
+                    return obj
+            except json.JSONDecodeError:
+                pass
 
     # 2. Truncation repair
     repaired = text
@@ -224,58 +314,124 @@ class DeepResearcher:
         self.min_confidence = Config.MIN_CONFIDENCE_TO_STOP
     
     def _build_user_prompt(self, state: ConversationState) -> str:
-        """Build the user prompt: raw message + search history + files found so far."""
+        """Build the user prompt: raw message + search history + files found so far (summaries when available) + why continue."""
         message_text = state["message_text"]
         search_history = state.get("search_history", [])
         research_files = state.get("research_files", [])
         iteration = state.get("research_iterations", 0)
-        
+        eval_reason = (state.get("eval_reason") or "").strip()
+        research_files_summary = (state.get("research_files_summary") or "").strip()
+
         # Search history: what was searched, why, and what was found (so the agent knows what to try next and what to avoid)
         history_block = ""
         if search_history:
             history_block = "\n\nSEARCH HISTORY (what was searched, why, and what was found — use this to plan the next search and avoid repeating):\n" + "\n".join(
                 f"  {i+1}. {entry}" for i, entry in enumerate(search_history)
             )
-        
-        # Files found so far: path, reason, and short snippet so the agent can judge relevance
+
+        # Files found so far: use LLM-generated summaries when available (from last evaluation); else path + pattern + longer snippet (no 180-char truncation)
         files_context = ""
         if research_files:
             files_context = "\n\nFILES FOUND SO FAR:\n"
-            for i, f in enumerate(research_files[:12], 1):
-                snippet = ((f.content or "").strip()[:180].replace("\n", " "))
-                files_context += f"  {i}. {f.path}\n     Why: {f.retrieval_reason}\n     Snippet: {snippet}...\n"
+            if research_files_summary:
+                files_context += research_files_summary
+            else:
+                for i, f in enumerate(research_files[:12], 1):
+                    pattern = getattr(f, "search_pattern", None) or ""
+                    snippet = ((f.content or "").strip()[:400].replace("\n", " "))
+                    files_context += f"  {i}. {f.path}\n     Pattern: {pattern}\n     Snippet: {snippet}...\n"
             if len(research_files) > 12:
-                files_context += f"  ... and {len(research_files) - 12} more\n"
-        
+                files_context += f"\n  ... and {len(research_files) - 12} more\n"
+
+        continue_block = ""
+        if eval_reason:
+            continue_block = f"\n\nLAST EVALUATION: CONTINUE — {eval_reason}\nUse this to decide what to search next (or output empty search_params [] if we now have enough)."
+
         return f"""USER MESSAGE: "{message_text}"
 {history_block}
 
 CURRENT RESEARCH ITERATION: {iteration}/{self.max_iterations}
 FILES FOUND: {len(research_files)}
 {files_context}
+{continue_block}
 
-Analyze the question and the search history. Decide what to search next (or output empty patterns if we have enough to evaluate). Output JSON with search_intent, thinking, and patterns."""
+Analyze the question, search history, and files above. Decide what to search next (or output empty patterns if we have enough to evaluate). Output JSON with search_intent, thinking, and patterns."""
 
-    def _build_files_summary(self, files: List[ResearchFile], max_per_file: int = 400) -> str:
-        """Build a summary of files for the evaluator: path, reason, and content snippet."""
+    def _build_files_summary(self, message_text: str, files: List[ResearchFile]) -> str:
+        """Build a summary of files for the evaluator via LLM: path + concise descriptive summary per file. No truncation."""
+        if not files:
+            return "(No files yet.)"
+        about_olake = (ABOUT_OLAKE or "").strip()
+        about_olake_repo_info = (ABOUT_OLAKE_REPO_INFO or "").strip()
+        system_prompt = _SUMMARIZE_FILES_SYSTEM.format(
+            about_olake=about_olake,
+            about_olake_repo_info=about_olake_repo_info,
+        )
+        # Process all files: batch only by context size so we never drop files (order may put important ones later)
+        batches: List[List[ResearchFile]] = []
+        current_batch: List[ResearchFile] = []
+        current_chars = 0
+        for f in files:
+            file_chars = len((f.content or "").strip())
+            if current_batch and current_chars + file_chars > _SUMMARIZE_MAX_CHARS:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            current_batch.append(f)
+            current_chars += file_chars
+        if current_batch:
+            batches.append(current_batch)
+        all_summaries: List[Dict[str, Any]] = []
+        for batch in batches:
+            user_parts = [f"USER QUESTION: {message_text}", ""]
+            for f in batch:
+                pattern = getattr(f, "search_pattern", None) or ""
+                user_parts.append(f"--- FILE: {f.path} ---")
+                user_parts.append(f"Pattern used for retrieval: {pattern}")
+                user_parts.append("")
+                user_parts.append((f.content or "").strip())
+                user_parts.append("")
+            user_message = "\n".join(user_parts)
+            try:
+                response = asyncio.run(
+                    get_chat_completion(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message},
+                        ],
+                        temperature=0.2,
+                    )
+                )
+                parsed = _parse_summarizer_json(response)
+                all_summaries.extend(parsed)
+            except Exception as e:
+                log.warning(f"[DeepResearcher] Summarizer LLM failed: {e}")
+                for f in batch:
+                    pattern = getattr(f, "search_pattern", None) or ""
+                    all_summaries.append({"file_path": f.path, "summary": f"(Pattern: {pattern}). Summarization failed."})
+        if not all_summaries:
+            for f in files:
+                pattern = getattr(f, "search_pattern", None) or ""
+                all_summaries.append({"file_path": f.path, "summary": f"Pattern used: {pattern}"})
         lines = []
-        for i, f in enumerate(files[:15], 1):
-            snippet = (f.content or "").strip()[:max_per_file].replace("\n", " ")
-            lines.append(f"{i}. {f.path}\n   Why: {f.retrieval_reason}\n   Snippet: {snippet}...")
+        for i, item in enumerate(all_summaries, 1):
+            path = item.get("file_path", "")
+            summary = (item.get("summary", "") or "").strip()
+            lines.append(f"{i}. {path}\n   {summary}")
         return "\n\n".join(lines) if lines else "(No files yet.)"
 
     def _evaluate_context(
         self,
         message_text: str,
         files: List[ResearchFile],
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """
-        Ask LLM whether we have enough context. Returns (decision, reason).
-        decision is CONTINUE or DONE.
+        Ask LLM whether we have enough context. Returns (decision, reason, files_summary).
+        files_summary is the LLM-generated summary of files (for passing to the planner on the next iteration).
         """
         if not files:
-            return "CONTINUE", "No files yet; need to search."
-        summary = self._build_files_summary(files)
+            return "CONTINUE", "No files yet; need to search.", "(No files yet.)"
+        summary = self._build_files_summary(message_text, files)
         prompt = _EVALUATE_PROMPT.format(
             message_text=message_text,
             files_summary=summary,
@@ -293,10 +449,10 @@ Analyze the question and the search history. Decide what to search next (or outp
             raw = (parsed.get("decision") or "CONTINUE").upper()
             decision = "DONE" if raw == "DONE" else "CONTINUE"
             reason = parsed.get("reason", "") or "Evaluation complete."
-            return decision, reason
+            return decision, reason, summary
         except Exception as e:
             log.warning(f"Evaluate step failed: {e}, defaulting to CONTINUE")
-            return "CONTINUE", "Evaluation failed; continuing to be safe."
+            return "CONTINUE", "Evaluation failed; continuing to be safe.", summary
 
     def _calculate_confidence(self, files: List[ResearchFile], iteration: int) -> float:
         """Calculate confidence score based on gathered files."""
@@ -465,7 +621,7 @@ Analyze the question and the search history. Decide what to search next (or outp
                             existing_paths.add(f.path)
                             all_files.append(f)
                             newly_added.append(f)
-                    state["research_files"] = all_files[:self.max_files]
+                    state["research_files"] = all_files[:self.max_files] #TODO
                     patterns_str = ", ".join(d.get("pattern", "") for d in params_to_run if d.get("pattern"))[:80]
                     found_str = ", ".join(f.path for f in newly_added[:5]) if newly_added else "none"
                     if len(newly_added) > 5:
@@ -502,7 +658,9 @@ Analyze the question and the search history. Decide what to search next (or outp
                 decision = "CONTINUE"
                 eval_reason = ""
                 if all_files:
-                    decision, eval_reason = self._evaluate_context(message_text, all_files)
+                    decision, eval_reason, files_summary = self._evaluate_context(message_text, all_files)
+                    state["research_files_summary"] = files_summary
+                    state["eval_reason"] = eval_reason
                     logger.logger.info(f"[DeepResearcher] Evaluate: {decision} — {eval_reason}")
                     thinking_log.append(f"Evaluate: {decision}. {eval_reason}")
                     state["thinking_log"] = thinking_log

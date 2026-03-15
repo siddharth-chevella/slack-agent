@@ -53,7 +53,7 @@ def _conversation_summary(thread_context: List[Dict[str, Any]], max_messages: in
     return "Previous conversation (recent messages):\n" + "\n".join(lines)
 
 
-_PROMPT_TEMPLATE = """You are a strict extractor. You must output valid JSON only, with no markdown fences and no trailing explanation.
+_PROMPT_TEMPLATE = """You are an intent classifier and strict extractor. You must output valid JSON only, with no markdown fences and no trailing explanation.
 
 Inputs:
 1) Current user question:
@@ -68,19 +68,28 @@ Inputs:
 4) Repositories available for search (ABOUT_OLAKE_REPO_INFO). Each repo has a name and description of what it contains:
 {about_olake_repo_info}
 
-Task:
-- Identify which sections of ABOUT_OLAKE are relevant to answering the current question and the conversation. Output that as "about_olake_relevant".
-- Identify which repository/repositories are most relevant to the question (e.g. olake for core/sync/connectors, olake-docs for documentation, olake-ui for UI/BFF, olake-helm for Kubernetes, olake-fusion for Iceberg table management/expiry). Output their names as "relevant_repos" (JSON array of strings, e.g. ["olake", "olake-docs"]). Use the exact repo names as they appear in the headers (olake, olake-ui, olake-docs, olake-helm, olake-fusion).
+STEP 1 — Understand intent (REQUIRED):
+- Decide whether the question NEEDS codebase search or is generic.
+- GENERIC (no codebase search): Questions answerable from general OLake knowledge, docs, or ABOUT_OLAKE alone — e.g. "What is OLake?", "How does OLake handle CDC?", "What connectors does OLake support?", "How do I deploy OLake?". No need to search source code.
+- NEEDS CODEBASE SEARCH: Questions that require looking at actual source code — e.g. "Where is snapshot expiry implemented?", "Which file defines the Kafka partition regex config?", "How is retention configured in the Postgres driver?", "Where do we log connection errors?". These need repo search.
+- When in doubt, prefer needs_codebase_search true if the question mentions specific files, functions, config keys, or implementation details.
+
+Output "needs_codebase_search": true or false (boolean).
+
+STEP 2 — Only when needs_codebase_search is true:
+- Identify which sections of ABOUT_OLAKE are relevant to answering the question and the conversation. Output that as "about_olake_relevant".
+- For each repository that is most relevant, output an entry in "relevant_repos" with: (1) "name" — exact repo name (olake, olake-ui, olake-docs, olake-helm, olake-fusion), (2) "summary_points" — 3-5 concise bullet points describing what that repo contains and why it matters for the question, (3) "connections" — array of bullet-point strings, one per connected repo, each describing how this repo is connected to that other repo (e.g. "Olake backend executes ingestion jobs triggered by olake-ui's BFF via HTTP calls (check, discover, sync), and sends live stats back for UI monitoring."). One bullet per repo connection; omit or use [] if none. Keep each connection description concise.
+
+When needs_codebase_search is false:
+- Set "about_olake_relevant" to "" (empty string) and "relevant_repos" to [] (empty array). Do not extract sections or repos.
 
 Rules (STRICT):
 - Do NOT add any information. Do NOT infer or assume facts. Do NOT alter or paraphrase the content — use it verbatim.
-- If the relevant ABOUT_OLAKE portions together are under ~1000 tokens (approximately 4000 characters), include them in full, unchanged.
-- If the relevant portions exceed that, summarise only those sections to stay within the limit. When summarising, preserve facts verbatim where possible; only shorten by removing tangential detail. Do not add new content.
-- Include only content from the ABOUT_OLAKE document in "about_olake_relevant". No preamble, no "based on the document", no extra commentary.
+- For about_olake_relevant: if the relevant portions are under ~1000 tokens (~4000 chars), include them in full; if longer, summarise to stay within the limit. Preserve facts verbatim; only shorten by removing tangential detail. Include only content from the ABOUT_OLAKE document. No preamble or commentary.
 - Output valid JSON only. No ``` markdown. No trailing commas or text after the closing brace.
 
 Output format (exactly):
-{{"about_olake_relevant": "<extract or summary of relevant ABOUT_OLAKE sections here>", "relevant_repos": ["repo1", "repo2"]}}
+{{"needs_codebase_search": true|false, "about_olake_relevant": "<extract or summary, or empty string if needs_codebase_search is false>", "relevant_repos": [{{"name": "olake", "summary_points": ["Core sync engine and drivers.", "Go + Java Iceberg writer.", "..."], "connections": ["Olake backend executes ingestion jobs triggered by olake-ui's BFF via HTTP (check, discover, sync); sends live stats back for UI monitoring.", "olake-helm deploys olake worker and UI as Kubernetes pods."]}}, {{"name": "olake-docs", "summary_points": ["User-facing docs.", "..."], "connections": []}}] or []}}
 """
 
 
@@ -114,15 +123,40 @@ def summarise_olake_context(state: ConversationState) -> ConversationState:
             )
         )
         parsed = _parse_json(response)
-        relevant = (parsed.get("about_olake_relevant") or "").strip()
-        state["about_olake_summary"] = relevant if relevant else ABOUT_OLAKE.strip()
-        repos = parsed.get("relevant_repos")
-        if isinstance(repos, list) and repos:
-            state["relevant_repos"] = [str(r).strip() for r in repos if str(r).strip()]
+        needs_codebase_search = bool(parsed.get("needs_codebase_search", True))
+        state["needs_codebase_search"] = needs_codebase_search
+
+        if needs_codebase_search:
+            relevant = (parsed.get("about_olake_relevant") or "").strip()
+            state["about_olake_summary"] = relevant if relevant else ABOUT_OLAKE.strip()
+            repos = parsed.get("relevant_repos")
+            if isinstance(repos, list) and repos:
+                names = []
+                detail = []
+                for r in repos:
+                    if isinstance(r, dict) and r.get("name"):
+                        names.append(str(r["name"]).strip())
+                        detail.append({
+                            "name": str(r["name"]).strip(),
+                            "summary_points": r.get("summary_points") if isinstance(r.get("summary_points"), list) else [],
+                            "connections": r.get("connections") if isinstance(r.get("connections"), list) else [],
+                        })
+                    elif isinstance(r, str) and r.strip():
+                        names.append(r.strip())
+                        detail.append({"name": r.strip(), "summary_points": [], "connections": []})
+                state["relevant_repos"] = names if names else ["olake"]
+                state["relevant_repos_detail"] = detail if detail else []
+            else:
+                state["relevant_repos"] = ["olake"]
+                state["relevant_repos_detail"] = []
         else:
-            state["relevant_repos"] = ["olake"]
+            state["about_olake_summary"] = ""
+            state["relevant_repos"] = []
+            state["relevant_repos_detail"] = []
     except Exception:
+        state["needs_codebase_search"] = True
         state["about_olake_summary"] = ABOUT_OLAKE.strip()
         state["relevant_repos"] = ["olake"]
+        state["relevant_repos_detail"] = []
 
     return state

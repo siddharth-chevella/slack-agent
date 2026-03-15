@@ -159,6 +159,8 @@ The tool was born from the team's experience building Datazip, a broader data an
 
 Key Claim: OLake delivers up to 7x faster bulk-load performance than Fivetran for PostgreSQL-to-Iceberg replication, and outpaces open-source alternatives like Airbyte and Debezium by 21x to over 600x in benchmark tests (NYC Taxi dataset, 4 billion rows, Azure infrastructure).
 
+How OLake connects to sources: OLake connects directly to the upstream database (or log source). It reads the source's change stream (PostgreSQL WAL, MySQL binlog, MongoDB oplog, etc.) as a consumer or client. OLake does not sit behind middleware or act as a replica, primary, or broker in the source's topology; it is always a direct client to the database it is reading from. Source-side settings that apply to the database's own replication (e.g. replica commit order) apply to that component, not to OLake's connection.
+
 ================================================================================
 2. SUPPORTED SOURCES & DESTINATIONS
 ================================================================================

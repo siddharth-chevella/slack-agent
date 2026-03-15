@@ -19,7 +19,7 @@ Slack name-to-ID cache is built at startup from users.list so that
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 
 log = logging.getLogger(__name__)
 
@@ -219,12 +219,13 @@ def get_escalation_targets(
 def format_escalation_message(
     targets: List[Dict],
     issue_summary: str = "",
-) -> str:
+) -> Union[str, int]:
     """
     Build the in-thread escalation message: only @mentions, no extra text.
+    Returns -1 when no reply should be sent (e.g. no targets); caller must not send.
     """
     if not targets:
-        return "Flagging this for the OLake team — someone will assist shortly."
+        return -1
 
     mentions = [resolve_mention(t["slack_name"]) for t in targets]
     return " ".join(mentions)

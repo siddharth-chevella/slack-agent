@@ -40,25 +40,28 @@ def escalation_handler(state: ConversationState) -> ConversationState:
 
         targets = get_escalation_targets(issue_text=message_text)
         final_message = format_escalation_message(targets, issue_summary=message_text)
-        state["response_text"] = final_message
-        state["response_blocks"] = slack_client.format_response_blocks(
-            response_text=final_message,
-            confidence=0.0,
-            is_clarification=False,
-            is_escalation=True,
-        )
 
-        slack_client.send_message(
-            channel=channel_id,
-            text=final_message,
-            thread_ts=thread_ts,
-            blocks=state["response_blocks"],
-        )
-
-        logger.logger.info(
-            f"[EscalationHandler] tagged {len(targets)} member(s): "
-            f"{[t['slack_name'] for t in targets]}"
-        )
+        if final_message == -1:
+            state["response_text"] = None
+            logger.logger.info("[EscalationHandler] no reply sent (format_escalation_message returned -1)")
+        else:
+            state["response_text"] = final_message
+            state["response_blocks"] = slack_client.format_response_blocks(
+                response_text=final_message,
+                confidence=0.0,
+                is_clarification=False,
+                is_escalation=True,
+            )
+            slack_client.send_message(
+                channel=channel_id,
+                text=final_message,
+                thread_ts=thread_ts,
+                blocks=state["response_blocks"],
+            )
+            logger.logger.info(
+                f"[EscalationHandler] tagged {len(targets)} member(s): "
+                f"{[t['slack_name'] for t in targets]}"
+            )
 
         try:
             processing_time = (datetime.now() - state["processing_start_time"]).total_seconds()
@@ -73,11 +76,11 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
                 urgency=str(state.get("urgency", "")),
-                response_text=final_message,
+                response_text=state.get("response_text"),
                 confidence=state.get("research_confidence", 0.0),
                 needs_clarification=False,
                 escalated=True,
-                escalation_reason=final_message,
+                escalation_reason=state.get("response_text") if state.get("response_text") else "Skipped (no message sent)",
                 docs_cited=None,
                 reasoning_summary=state.get("reasoning_trace", ""),
                 processing_time=processing_time,

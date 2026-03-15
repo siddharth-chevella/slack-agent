@@ -160,6 +160,51 @@ def print_decision(intent: str, urgency: str, confidence: float,
     print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
 
 
+# ── pretty agent steps printer (which node ran + result) ───────────────────
+def print_agent_steps(steps: List[Dict[str, Any]]) -> None:
+    """Pretty print each graph step: node name and result summary."""
+    if not steps:
+        return
+    section_header("AGENT STEPS (node → result)")
+    for s in steps:
+        if s.get("phase") != "end":
+            continue
+        node = s.get("node", "?")
+        data = s.get("data") or {}
+        err = data.get("error")
+        if err:
+            print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
+            print(f"{BOX_V} {BOLD}{RED}✗ {node}{RESET}".ljust(58) + f"{BOX_V}")
+            print(f"{BOX_V}  {RED}Error: {err[:48]}{RESET}".ljust(58) + f"{BOX_V}")
+            print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
+            continue
+        parts = []
+        for k, v in data.items():
+            if v is None:
+                parts.append(f"  {k}=None")
+            elif isinstance(v, bool):
+                parts.append(f"  {k}={str(v).lower()}")
+            elif isinstance(v, (int, float)):
+                if isinstance(v, float) and 0 <= v <= 1:
+                    parts.append(f"  {k}={v:.2f}")
+                else:
+                    parts.append(f"  {k}={v}")
+            elif isinstance(v, list):
+                parts.append(f"  {k}=[{len(v)} items]")
+            elif isinstance(v, str) and len(v) > 40:
+                parts.append(f"  {k}={v[:40]}…")
+            else:
+                parts.append(f"  {k}={v}")
+        body = "\n".join(parts) if parts else "  (no summary)"
+        print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
+        print(f"{BOX_V} {BOLD}{GREEN}✓ {node}{RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_V}{BOX_H*56}{BOX_V}")
+        for line in body.split("\n"):
+            print(f"{BOX_V}{DIM}{line}{RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
+    footer()
+
+
 # ── pretty final result printer ───────────────────────────────────────────
 def print_final_result(response: str, latency: float, docs_count: int,
                        confidence: float, 
@@ -457,7 +502,13 @@ def run_message(
         with progress_lock:
             progress_events.append(ev)
 
+    step_events: List[Dict[str, Any]] = []
+
+    def on_step(phase: str, node_name: str, data: Any) -> None:
+        step_events.append({"phase": phase, "node": node_name, "data": data})
+
     state["_cli_progress_callback"] = on_progress
+    state["_step_log_callback"] = on_step
 
     result_holder: List[Optional[dict]] = [None]
     exc_holder: List[Optional[Exception]] = [None]
@@ -496,14 +547,18 @@ def run_message(
         raise exc_holder[0]
 
     result = result_holder[0]
-    return {"state": result, "elapsed": elapsed}
+    return {"state": result, "elapsed": elapsed, "steps": step_events}
 
 
 def print_result(result: dict, iteration: int = None):
     """Print result with pretty formatting."""
     state = result["state"]
     elapsed = result["elapsed"]
-    
+    steps = result.get("steps", [])
+
+    # Which agents ran and their results (pretty-printed)
+    print_agent_steps(steps)
+
     # Intent and decision
     intent = state.get("intent_type")
     urgency = state.get("urgency")

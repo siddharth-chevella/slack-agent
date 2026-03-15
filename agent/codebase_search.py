@@ -366,6 +366,7 @@ class CodebaseSearchEngine:
                 source=matches[0].source,
                 language=matches[0].language,
                 retrieval_reason=f"Matched query: {query}",
+                search_pattern=query,
             ))
         
         return research_files

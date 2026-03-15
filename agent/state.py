@@ -53,6 +53,7 @@ class ResearchFile:
     source: str  # "ripgrep" | "ast-grep"
     language: str
     retrieval_reason: str  # Why this file was retrieved (small summary)
+    search_pattern: Optional[str] = None  # Pattern used for retrieval (e.g. ripgrep/ast-grep pattern)
 
 
 @dataclass
@@ -103,8 +104,10 @@ class ConversationState(TypedDict):
     is_conceptual: bool                   # True if question can be answered without code search
 
     # OLake context (summarised for this turn by olake_context_summariser when used)
-    about_olake_summary: Optional[str]   # focused excerpt of ABOUT_OLAKE for this query; else full ABOUT_OLAKE
-    relevant_repos: Optional[List[str]]  # repo names to prefer for this question (e.g. ["olake", "olake-docs"])
+    needs_codebase_search: Optional[bool]  # True if question requires codebase search; False = generic, go straight to solution_provider
+    about_olake_summary: Optional[str]   # focused excerpt of ABOUT_OLAKE for this query; set only when needs_codebase_search; else empty
+    relevant_repos: Optional[List[str]]  # repo names to prefer for this question; set only when needs_codebase_search; else empty
+    relevant_repos_detail: Optional[List[Dict[str, Any]]]  # per-repo summary_points and connections; set only when needs_codebase_search
 
     # Deep Research Agent
     research_context: Dict[str, Any]      # accumulated research data
@@ -113,6 +116,8 @@ class ConversationState(TypedDict):
     thinking_log: List[str]               # Alex's thoughts per iteration
     search_history: List[str]             # what was searched, why, and what was found (for next iteration)
     research_files: List[ResearchFile]    # files found during research
+    research_files_summary: Optional[str] # LLM-generated summary of research_files (for planner on next iteration)
+    eval_reason: Optional[str]            # last evaluator reason (CONTINUE/DONE) so planner knows why we continue
     research_done: bool                   # True when research is complete
     research_confidence: float            # confidence in gathered context (0-1); used for routing
 
