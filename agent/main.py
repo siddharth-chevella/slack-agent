@@ -23,12 +23,11 @@ from agent.graph import get_agent_graph
 from agent.state import create_initial_state
 from agent.logger import get_logger
 from agent.persistence import get_database
-from agent.team_resolver import (
+from agent.team import (
     load_team,
     build_name_to_id_cache,
     set_bot_user_id,
     is_org_member_by_id,
-    is_org_member_by_name,
 )
 
 
@@ -41,17 +40,12 @@ slack_client = create_slack_client()
 # Startup initialization
 # ---------------------------------------------------------------------------
 
-def initialize_team_resolver() -> None:
+def initialize_team() -> None:
     """
     At startup:
-      1. Call auth.test to get the bot's own Slack user ID.
-      2. Call users.list to build a slack_name → user_id cache for OLake team members.
-      3. Load olake-team.json.
-
-    This ensures:
-      - Thread messages can be labelled [BOT] / [USER] correctly.
-      - Escalation @mentions use proper <@USERID> format (reliable pings).
-      - Org-member detection works by ID (fallback: display-name).
+      1. auth.test → bot's own user ID.
+      2. Load olake-team.json.
+      3. users.list → build slack_name → user_id cache for org-member detection and mentions.
     """
     try:
         # 1. Bot identity
@@ -81,10 +75,10 @@ def initialize_team_resolver() -> None:
                 break
 
         build_name_to_id_cache(all_users)
-        logger.logger.info("Team resolver initialized successfully.")
+        logger.logger.info("Team initialized successfully.")
 
     except Exception as e:
-        logger.logger.error(f"Team resolver initialization failed: {e}. Org-member features will use name-matching fallback.")
+        logger.logger.error(f"Team initialization failed: {e}. Org-member features will use name-matching fallback.")
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +261,7 @@ def main():
     get_agent_graph()
 
     # Initialize team resolver (bot user ID + slack_name→ID cache)
-    initialize_team_resolver()
+    initialize_team()
 
     logger.logger.info("=" * 60)
     logger.logger.info("OLake Slack Community Agent Starting")

@@ -66,8 +66,7 @@ class Config:
         c.strip() for c in os.getenv("HIGH_PRIORITY_CHANNELS", "").split(",") if c.strip()
     ]
 
-    # Team / Escalation — loaded from olake-team.json (no env var needed)
-    # Org member detection uses slack_name matching via team_resolver.py
+    # Team — olake-team.json for org-member detection and escalation prompt
     TEAM_FILE: Path = Path(__file__).parent.parent / "olake-team.json"
 
     # Terminal Tool

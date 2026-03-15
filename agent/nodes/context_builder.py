@@ -5,7 +5,7 @@ Key behaviors:
   - Fetches thread messages from both the DB and Slack API
   - Annotates each thread message with `is_bot` flag (True if sent by this OLake agent)
   - Sets state["org_member_replied"] = True if any org team member has posted in the thread
-    (detection uses slack_name matching via team_resolver)
+    (detection uses slack_name matching via agent.team)
 """
 
 from typing import Dict, Any, List
@@ -15,11 +15,7 @@ from agent.persistence import get_database
 from agent.slack_client import create_slack_client
 from agent.logger import get_logger, EventType
 from agent.config import Config
-from agent.team_resolver import (
-    is_org_member_by_name,
-    is_org_member_by_id,
-    get_bot_user_id,
-)
+from agent.team import is_org_member_by_name, is_org_member_by_id, get_bot_user_id
 
 
 def build_context(state: ConversationState) -> ConversationState:

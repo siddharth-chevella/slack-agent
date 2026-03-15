@@ -1,26 +1,22 @@
 """
-Escalation Handler Node — Tags relevant team members based on the question.
-
-Uses team_resolver (keyword → department → members) to pick who to escalate to,
-then sends an in-thread message that @mentions them. No LLM; routing is deterministic.
+Escalation Handler — Ask the LLM to choose one team member for the query, then @mention them.
 """
 
 from __future__ import annotations
 import json
 from datetime import datetime
-from typing import Dict, Any
 
 from agent.state import ConversationState, ConversationRecord
 from agent.slack_client import create_slack_client
 from agent.persistence import get_database
 from agent.logger import get_logger
-from agent.team_resolver import get_escalation_targets, format_escalation_message
+from agent.team import get_all_members_flat, resolve_mention
+from agent.llm import get_chat_completion_sync
 
 
 def escalation_handler(state: ConversationState) -> ConversationState:
     """
-    Tag relevant team members in-thread based on the user question.
-    Uses get_escalation_targets(message_text) and format_escalation_message.
+    Send the team list and user query to the LLM; it chooses one person. Tag them in-thread.
     """
     logger = get_logger()
     db = get_database()
@@ -38,30 +34,62 @@ def escalation_handler(state: ConversationState) -> ConversationState:
             emoji="white_check_mark",
         )
 
-        targets = get_escalation_targets(issue_text=message_text)
-        final_message = format_escalation_message(targets, issue_summary=message_text)
-
-        if final_message == -1:
+        members = get_all_members_flat()
+        if not members:
+            logger.logger.info("[EscalationHandler] no team members; skipping reply")
             state["response_text"] = None
-            logger.logger.info("[EscalationHandler] no reply sent (format_escalation_message returned -1)")
-        else:
-            state["response_text"] = final_message
-            state["response_blocks"] = slack_client.format_response_blocks(
-                response_text=final_message,
-                confidence=0.0,
-                is_clarification=False,
-                is_escalation=True,
+            return state
+
+        team_list = "\n".join(
+            f"- {m['slack_name']} ({m.get('role', '')}, {m.get('dept', '')})"
+            for m in members
+        )
+        prompt = (
+            "You are escalating a user question to exactly one team member. "
+            "Choose the best person to help. Reply with only that person's slack_name, nothing else.\n\n"
+            "Team:\n" + team_list
+        )
+        query = f"User question: {message_text or '(no message)'}"
+
+        try:
+            reply = get_chat_completion_sync(
+                [
+                    {"role": "user", "content": f"{prompt}\n\n{query}"},
+                ],
+                temperature=0.2,
+                max_tokens=100,
             )
-            slack_client.send_message(
-                channel=channel_id,
-                text=final_message,
-                thread_ts=thread_ts,
-                blocks=state["response_blocks"],
-            )
-            logger.logger.info(
-                f"[EscalationHandler] tagged {len(targets)} member(s): "
-                f"{[t['slack_name'] for t in targets]}"
-            )
+        except Exception as e:
+            logger.logger.warning(f"[EscalationHandler] LLM failed: {e}")
+            state["response_text"] = None
+            return state
+
+        name = (reply or "").strip().split("\n")[0].strip()
+        if not name:
+            state["response_text"] = None
+            return state
+
+        # Match to a team member (case-insensitive) for proper mention
+        for m in members:
+            if m["slack_name"].lower() == name.lower():
+                name = m["slack_name"]
+                break
+        final_message = resolve_mention(name)
+
+        state["response_text"] = final_message
+        state["response_blocks"] = slack_client.format_response_blocks(
+            response_text=final_message,
+            confidence=0.0,
+            is_clarification=False,
+            is_escalation=True,
+        )
+        slack_client.send_message(
+            channel=channel_id,
+            text=final_message,
+            thread_ts=thread_ts,
+            blocks=state["response_blocks"],
+        )
+        logger.logger.info(f"[EscalationHandler] tagged: {name}")
 
         try:
             processing_time = (datetime.now() - state["processing_start_time"]).total_seconds()
@@ -80,7 +108,7 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 confidence=state.get("research_confidence", 0.0),
                 needs_clarification=False,
                 escalated=True,
-                escalation_reason=state.get("response_text") if state.get("response_text") else "Skipped (no message sent)",
+                escalation_reason=state.get("response_text") or "Skipped (no message sent)",
                 docs_cited=None,
                 reasoning_summary=state.get("reasoning_trace", ""),
                 processing_time=processing_time,
