@@ -138,7 +138,7 @@ async def _get_ollama_completion(
         if not response.choices:
             raise RuntimeError("Ollama returned no choices")
         content = response.choices[0].message.content
-        print("Ollama content:", content)
+        # print("Ollama content:", content)
         if content is None:
             raise RuntimeError("Ollama returned empty content")
         return content

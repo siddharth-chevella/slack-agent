@@ -59,12 +59,15 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 temperature=0.2,
                 max_tokens=100,
             )
+
+            print("escalation_handler: reply:", reply)
         except Exception as e:
             logger.logger.warning(f"[EscalationHandler] LLM failed: {e}")
             state["response_text"] = None
             return state
 
         name = (reply or "").strip().split("\n")[0].strip()
+        print("escalation_handler: name:", name)
         if not name:
             state["response_text"] = None
             return state
@@ -75,7 +78,7 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 name = m["slack_name"]
                 break
         final_message = resolve_mention(name)
-
+        print("escalation_handler: final_message:", final_message)
         state["response_text"] = final_message
         state["response_blocks"] = slack_client.format_response_blocks(
             response_text=final_message,
@@ -103,7 +106,6 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 user_id=user_id,
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
-                urgency=str(state.get("urgency", "")),
                 response_text=state.get("response_text"),
                 confidence=state.get("research_confidence", 0.0),
                 needs_clarification=False,

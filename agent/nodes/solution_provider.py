@@ -162,7 +162,6 @@ def solution_provider(state: ConversationState) -> ConversationState:
                     user_id=user_id,
                     message_text=message_text,
                     intent_type=str(state.get("intent_type", "")),
-                    urgency=str(state.get("urgency", "")),
                     response_text=final_message,
                     confidence=state.get("research_confidence", 0.0),
                     needs_clarification=False,
@@ -183,28 +182,29 @@ def solution_provider(state: ConversationState) -> ConversationState:
 
         try:
             final_message = asyncio.run(_generate_solution(state))
+            print("solution_provider: final_message 01:", final_message)
         except Exception as gen_err:
             logger.logger.warning(f"[SolutionProvider] LLM call failed: {gen_err}. Sending minimal fallback.")
             final_message = ""
-
         final_message = (final_message or "").strip()
+        print("solution_provider: final_message 02:", final_message)
         state["response_text"] = final_message
 
-        blocks = slack_client.format_response_blocks(
-            response_text=final_message,
-            confidence=state.get("research_confidence", 0.0),
-            docs_cited=None,
-            is_clarification=False,
-            is_escalation=False,
-        )
-        state["response_blocks"] = blocks
+        # blocks = slack_client.format_response_blocks(
+        #     response_text=final_message,
+        #     confidence=state.get("research_confidence", 0.0),
+        #     docs_cited=None,
+        #     is_clarification=False,
+        #     is_escalation=False,
+        # )
+        # state["response_blocks"] = blocks
 
-        slack_client.send_message(
-            channel=channel_id,
-            text=final_message,
-            thread_ts=thread_ts,
-            blocks=blocks,
-        )
+        # slack_client.send_message(
+        #     channel=channel_id,
+        #     text=final_message,
+        #     thread_ts=thread_ts,
+        #     blocks=blocks,
+        # )
 
         logger.logger.info(f"[SolutionProvider] sent answer len={len(final_message)}")
 
@@ -221,7 +221,6 @@ def solution_provider(state: ConversationState) -> ConversationState:
                 user_id=user_id,
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
-                urgency=str(state.get("urgency", "")),
                 response_text=final_message,
                 confidence=state.get("research_confidence", 0.0),
                 needs_clarification=needs_clarification,

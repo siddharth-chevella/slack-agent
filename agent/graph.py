@@ -65,11 +65,12 @@ def _step_summary(node_name: str, state: ConversationState) -> Dict[str, Any]:
 
 
 def _wrap_node(node_name: str, node_fn: Callable[[ConversationState], ConversationState]):
-    """Wrap a node so we log step start/end and optionally notify a callback (e.g. test_agent)."""
+    """Wrap a node so we log step start/end, persist full node output for lineage, and optionally notify a callback."""
 
     def wrapped(state: ConversationState) -> ConversationState:
         logger = get_logger()
         callback = state.get("_step_log_callback")
+        step_order = (state.get("_node_step_order") or 0) + 1
         try:
             logger.log_step_start(node_name)
             if callback:
@@ -85,6 +86,16 @@ def _wrap_node(node_name: str, node_fn: Callable[[ConversationState], Conversati
                     callback("end", node_name, summary)
                 except Exception:
                     pass
+            # Persist full node output for lineage (eval dashboard)
+            message_ts = result.get("message_ts") or state.get("message_ts")
+            if message_ts:
+                try:
+                    from agent.persistence import get_database
+                    get_database().save_node_output(message_ts, node_name, step_order, dict(result))
+                except Exception:
+                    pass
+            # Pass step order to next node
+            result["_node_step_order"] = step_order
             return result
         except Exception as e:
             err_msg = str(e)

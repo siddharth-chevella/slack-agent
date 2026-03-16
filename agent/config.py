@@ -43,10 +43,6 @@ class Config:
     ENABLE_USER_LEARNING: bool = os.getenv("ENABLE_USER_LEARNING", "true").lower() == "true"
     MAX_CONTEXT_MESSAGES: int = int(os.getenv("MAX_CONTEXT_MESSAGES", "10"))
 
-    # Threshold above which retrieved docs are considered sufficient to answer the question
-    DOCS_ANSWER_THRESHOLD: float = float(os.getenv("DOCS_ANSWER_THRESHOLD", "0.5"))
-    DOCS_PATH: str = os.getenv("DOCS_PATH", "docs/olake_knowledge_base")
-
     # Database
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/slack_agent.db")
     
@@ -129,7 +125,6 @@ class Config:
         print(f"Confidence Threshold: {cls.CONFIDENCE_THRESHOLD_FOR_AUTO_REPLY}")
         print(f"Deep Reasoning Enabled: {cls.ENABLE_DEEP_REASONING}")
         print(f"User Learning Enabled: {cls.ENABLE_USER_LEARNING}")
-        print(f"Vector Search Enabled: {cls.ENABLE_VECTOR_SEARCH}")
         print(f"Database Path: {cls.DATABASE_PATH}")
         print(f"Webhook Port: {cls.WEBHOOK_PORT}")
         print(f"Log Level: {cls.LOG_LEVEL}")

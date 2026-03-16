@@ -32,6 +32,8 @@ def _parse_json(text: str | None) -> list:
     if not text:
         raise ValueError("LLM returned empty")
     text = _PARSE_RE_FENCE.sub("", text.strip())
+
+    print("clarification_asker: text:", text)
     return json.loads(text)
 
 
@@ -110,7 +112,7 @@ async def clarification_asker(state: ConversationState) -> Dict[str, Any]:
 Problem summary: {problem_summary}
 Internal Agent Gaps: {gaps} (Do NOT ask the user to solve these gaps for you. Only ask for context about their setup.)
 
-Generate 1–2 clarifying questions about the USER'S specific setup or intent. Return JSON array only."""
+Generate 1-2 clarifying questions about the USER'S specific setup or intent. Return JSON array only."""
 
             response = await get_chat_completion(
                 messages=[
@@ -155,7 +157,6 @@ Generate 1–2 clarifying questions about the USER'S specific setup or intent. R
                 user_id=user_id,
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
-                urgency=str(state.get("urgency", "")),
                 response_text=message_body,
                 confidence=state.get("final_confidence", 0.0),
                 needs_clarification=True,

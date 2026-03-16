@@ -35,6 +35,8 @@ def _parse_json(text: str | None) -> dict:
         if text.count('"') % 2 != 0:
             text += '"'
         text += "}"
+    
+    print("olake_context_summariser:", text)
     return json.loads(text)
 
 
@@ -122,6 +124,7 @@ def summarise_olake_context(state: ConversationState) -> ConversationState:
                 temperature=0.1,
             )
         )
+        print("olake_context_summariser: response:", response)
         parsed = _parse_json(response)
         needs_codebase_search = bool(parsed.get("needs_codebase_search", True))
         state["needs_codebase_search"] = needs_codebase_search
@@ -132,31 +135,20 @@ def summarise_olake_context(state: ConversationState) -> ConversationState:
             repos = parsed.get("relevant_repos")
             if isinstance(repos, list) and repos:
                 names = []
-                detail = []
                 for r in repos:
                     if isinstance(r, dict) and r.get("name"):
                         names.append(str(r["name"]).strip())
-                        detail.append({
-                            "name": str(r["name"]).strip(),
-                            "summary_points": r.get("summary_points") if isinstance(r.get("summary_points"), list) else [],
-                            "connections": r.get("connections") if isinstance(r.get("connections"), list) else [],
-                        })
                     elif isinstance(r, str) and r.strip():
                         names.append(r.strip())
-                        detail.append({"name": r.strip(), "summary_points": [], "connections": []})
                 state["relevant_repos"] = names if names else ["olake"]
-                state["relevant_repos_detail"] = detail if detail else []
             else:
                 state["relevant_repos"] = ["olake"]
-                state["relevant_repos_detail"] = []
         else:
             state["about_olake_summary"] = ""
             state["relevant_repos"] = []
-            state["relevant_repos_detail"] = []
     except Exception:
         state["needs_codebase_search"] = True
         state["about_olake_summary"] = ABOUT_OLAKE.strip()
         state["relevant_repos"] = ["olake"]
-        state["relevant_repos_detail"] = []
 
     return state

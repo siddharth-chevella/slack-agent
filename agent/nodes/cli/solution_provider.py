@@ -219,7 +219,6 @@ def cli_solution_provider(state: ConversationState) -> ConversationState:
                 user_id=user_id,
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
-                urgency=str(state.get("urgency", "")),
                 response_text=final_message,
                 confidence=confidence,
                 needs_clarification=False,

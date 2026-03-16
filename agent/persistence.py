@@ -1,24 +1,47 @@
 """
 Database persistence for OLake Slack Community Agent.
 
-Manages storage of conversations, user profiles, and interaction history.
+Manages storage of conversations, user profiles, interaction history,
+and per-node output lineage for each conversation.
 """
 
+import dataclasses
 import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
+from enum import Enum
 
 from agent.state import (
     ConversationRecord,
     UserInteraction,
     UserProfile,
     IntentType,
-    UrgencyLevel
 )
 from agent.logger import get_logger
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Convert state (or any nested structure) to JSON-serializable form. Skips keys starting with _."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Enum):
+        return obj.value
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return _sanitize_for_json(dataclasses.asdict(obj))
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items() if not (isinstance(k, str) and k.startswith("_"))}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(x) for x in obj]
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return str(obj)
 
 
 class Database:
@@ -55,7 +78,7 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Conversations table
+            # Conversations table (urgency removed as deprecated)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +88,6 @@ class Database:
                     user_id TEXT NOT NULL,
                     message_text TEXT NOT NULL,
                     intent_type TEXT,
-                    urgency TEXT,
                     response_text TEXT,
                     confidence REAL DEFAULT 0.0,
                     needs_clarification INTEGER DEFAULT 0,
@@ -154,6 +176,31 @@ class Database:
                     cursor.execute("ALTER TABLE conversations ADD COLUMN retrieval_file_paths TEXT")
             except Exception:
                 pass
+
+            # Migration: drop deprecated urgency column (SQLite 3.35+)
+            try:
+                cursor.execute("PRAGMA table_info(conversations)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if "urgency" in cols:
+                    cursor.execute("ALTER TABLE conversations DROP COLUMN urgency")
+            except Exception:
+                pass
+
+            # Node outputs: full lineage per conversation (each node's full state output as JSON)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS node_outputs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_ts TEXT NOT NULL,
+                    node_name TEXT NOT NULL,
+                    step_order INTEGER NOT NULL,
+                    output_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_node_outputs_message_ts
+                ON node_outputs(message_ts, step_order)
+            """)
             
             # DEBUG only: avoid cluttering console; this is SQLite persistence, not vectordb
             self.logger.logger.debug("Persistence database (SQLite) ready")
@@ -195,40 +242,115 @@ class Database:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT INTO conversations (
-                    message_ts, thread_ts, channel_id, user_id, message_text,
-                    intent_type, urgency, response_text, confidence,
-                    needs_clarification, escalated, escalation_reason,
-                    docs_cited, reasoning_summary, processing_time,
-                    created_at, resolved, resolved_at,
-                    retrieval_queries, retrieval_file_paths
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                record.message_ts,
-                record.thread_ts,
-                record.channel_id,
-                record.user_id,
-                record.message_text,
-                record.intent_type,
-                record.urgency,
-                record.response_text,
-                record.confidence,
-                1 if record.needs_clarification else 0,
-                1 if record.escalated else 0,
-                record.escalation_reason,
-                record.docs_cited,
-                record.reasoning_summary,
-                record.processing_time,
-                record.created_at,
-                1 if record.resolved else 0,
-                record.resolved_at,
-                record.retrieval_queries,
-                record.retrieval_file_paths,
-            ))
+            cursor.execute("PRAGMA table_info(conversations)")
+            cols = [row[1] for row in cursor.fetchall()]
+            has_urgency = "urgency" in cols
+            if has_urgency:
+                cursor.execute("""
+                    INSERT INTO conversations (
+                        message_ts, thread_ts, channel_id, user_id, message_text,
+                        intent_type, urgency, response_text, confidence,
+                        needs_clarification, escalated, escalation_reason,
+                        docs_cited, reasoning_summary, processing_time,
+                        created_at, resolved, resolved_at,
+                        retrieval_queries, retrieval_file_paths
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    record.message_ts,
+                    record.thread_ts,
+                    record.channel_id,
+                    record.user_id,
+                    record.message_text,
+                    record.intent_type,
+                    None,  # deprecated urgency
+                    record.response_text,
+                    record.confidence,
+                    1 if record.needs_clarification else 0,
+                    1 if record.escalated else 0,
+                    record.escalation_reason,
+                    record.docs_cited,
+                    record.reasoning_summary,
+                    record.processing_time,
+                    record.created_at,
+                    1 if record.resolved else 0,
+                    record.resolved_at,
+                    record.retrieval_queries,
+                    record.retrieval_file_paths,
+                ))
+            else:
+                cursor.execute("""
+                    INSERT INTO conversations (
+                        message_ts, thread_ts, channel_id, user_id, message_text,
+                        intent_type, response_text, confidence,
+                        needs_clarification, escalated, escalation_reason,
+                        docs_cited, reasoning_summary, processing_time,
+                        created_at, resolved, resolved_at,
+                        retrieval_queries, retrieval_file_paths
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    record.message_ts,
+                    record.thread_ts,
+                    record.channel_id,
+                    record.user_id,
+                    record.message_text,
+                    record.intent_type,
+                    record.response_text,
+                    record.confidence,
+                    1 if record.needs_clarification else 0,
+                    1 if record.escalated else 0,
+                    record.escalation_reason,
+                    record.docs_cited,
+                    record.reasoning_summary,
+                    record.processing_time,
+                    record.created_at,
+                    1 if record.resolved else 0,
+                    record.resolved_at,
+                    record.retrieval_queries,
+                    record.retrieval_file_paths,
+                ))
             
             return cursor.lastrowid
+
+    def save_node_output(
+        self,
+        message_ts: str,
+        node_name: str,
+        step_order: int,
+        output: Dict[str, Any],
+    ) -> int:
+        """
+        Persist a single node's full output (state after that node) as JSON for lineage.
+        """
+        payload = _sanitize_for_json(output)
+        output_json = json.dumps(payload)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO node_outputs (message_ts, node_name, step_order, output_json)
+                VALUES (?, ?, ?, ?)
+            """, (message_ts, node_name, step_order, output_json))
+            return cursor.lastrowid
+
+    def get_node_outputs(self, message_ts: str) -> List[Dict[str, Any]]:
+        """Return node outputs for a conversation (message_ts), ordered by step_order."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT node_name, step_order, output_json, created_at
+                FROM node_outputs
+                WHERE message_ts = ?
+                ORDER BY step_order ASC
+            """, (message_ts,))
+            rows = cursor.fetchall()
+        out = []
+        for row in rows:
+            out.append({
+                "node_name": row["node_name"],
+                "step_order": row["step_order"],
+                "output_json": json.loads(row["output_json"]) if row["output_json"] else {},
+                "created_at": row["created_at"],
+            })
+        return out
     
     def get_user_recent_messages(
         self,

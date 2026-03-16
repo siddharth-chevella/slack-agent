@@ -188,8 +188,10 @@ def _parse_json(text: str | None) -> dict:
     text = text.strip()
     text = _PARSE_RE_FENCE.sub("", text).strip()
 
+    
     # 1. Happy path
     try:
+        print("deep_researcher: happy path:", text)
         return json.loads(text)
     except json.JSONDecodeError:
         pass
@@ -232,6 +234,7 @@ def _parse_json(text: str | None) -> dict:
             json_slice = text[first_brace : end + 1]
             try:
                 obj = json.loads(json_slice)
+                print("deep_researcher:", obj)
                 if isinstance(obj, dict) and ("search_params" in obj or "thinking" in obj or "search_intent" in obj):
                     return obj
             except json.JSONDecodeError:
@@ -245,6 +248,7 @@ def _parse_json(text: str | None) -> dict:
             repaired += '"'
         repaired += '}'
     try:
+        print("deep_researcher: repaired:", repaired)
         return json.loads(repaired)
     except json.JSONDecodeError:
         pass
@@ -677,15 +681,6 @@ Analyze the question, search history, and files above. Decide what to search nex
                     state["research_done"] = True
                     break
             
-            # Build research context summary (search history + evaluation)
-            state["research_context"] = {
-                "total_iterations": iteration,
-                "total_files": len(all_files),
-                "final_confidence": state["research_confidence"],
-                "thinking_summary": "\n\n".join(thinking_log),
-                "search_history": search_history,
-                "eval_reason": eval_reason,
-            }
             # Feed downstream: research confidence (used for routing)
             state["final_confidence"] = state["research_confidence"]
             state["doc_sufficient"] = state["research_confidence"] >= Config.MIN_CONFIDENCE_TO_STOP
@@ -710,7 +705,6 @@ Analyze the question, search history, and files above. Decide what to search nex
             state["research_confidence"] = 0.8
             state["research_error"] = True
             state["response_text"] = ""
-            state["research_context"] = {"error": str(e)}
         
         return state
 

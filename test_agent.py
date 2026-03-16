@@ -138,7 +138,7 @@ def print_research_files(files: List[Any], iteration: int = None):
 
 
 # ── pretty decision printer ───────────────────────────────────────────────
-def print_decision(intent: str, urgency: str, confidence: float, 
+def print_decision(intent: str, confidence: float,
                    should_escalate: bool = False, escalation_reason: str = None):
     """Pretty print agent decision."""
     conf_color = GREEN if confidence >= 0.7 else YELLOW if confidence >= 0.4 else RED
@@ -147,7 +147,6 @@ def print_decision(intent: str, urgency: str, confidence: float,
     print(f"{BOX_V} {BOLD}{CYAN}🧠 AGENT DECISION{RESET}".ljust(58) + f"{BOX_V}")
     print(f"{BOX_V}{BOX_H*56}{BOX_V}")
     print(f"{BOX_V}  Intent:    {BOLD}{intent}{RESET}".ljust(58) + f"{BOX_V}")
-    print(f"{BOX_V}  Urgency:   {BOLD}{urgency}{RESET}".ljust(58) + f"{BOX_V}")
     print(f"{BOX_V}  Confidence: {conf_color}{confidence:.0%}{RESET}".ljust(58) + f"{BOX_V}")
     
     if should_escalate:
@@ -561,10 +560,8 @@ def print_result(result: dict, iteration: int = None):
 
     # Intent and decision
     intent = state.get("intent_type")
-    urgency = state.get("urgency")
     confidence = state.get("final_confidence", 0.0)
     intent_str = intent.value if intent else "?"
-    urgency_str = urgency.value if urgency else "?"
     
     # Escalation
     should_escalate = state.get("should_escalate", False)
@@ -573,7 +570,6 @@ def print_result(result: dict, iteration: int = None):
     # Print decision
     print_decision(
         intent=intent_str,
-        urgency=urgency_str,
         confidence=confidence,
         should_escalate=should_escalate,
         escalation_reason=escalation_reason

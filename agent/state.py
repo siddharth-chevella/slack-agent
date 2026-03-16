@@ -19,14 +19,6 @@ class IntentType(Enum):
     UNKNOWN = "unknown"
 
 
-class UrgencyLevel(Enum):
-    """Urgency levels for issues."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
 @dataclass
 class UserProfile:
     """User profile with interaction history."""
@@ -93,26 +85,18 @@ class ConversationState(TypedDict):
     
     # Intent analysis
     intent_type: Optional[IntentType]
-    urgency: Optional[UrgencyLevel]
-    key_topics: List[str]
-    technical_terms: List[str]
     
     # Optional summary/signals (set by deep_researcher when present in LLM output)
     problem_summary: Optional[str]        # one-sentence restatement of the issue
-    sub_questions: List[str]              # (unused; kept for compatibility)
-    is_ambiguous: bool                    # (unused; kept for compatibility)
     is_conceptual: bool                   # True if question can be answered without code search
 
     # OLake context (summarised for this turn by olake_context_summariser when used)
     needs_codebase_search: Optional[bool]  # True if question requires codebase search; False = generic, go straight to solution_provider
     about_olake_summary: Optional[str]   # focused excerpt of ABOUT_OLAKE for this query; set only when needs_codebase_search; else empty
     relevant_repos: Optional[List[str]]  # repo names to prefer for this question; set only when needs_codebase_search; else empty
-    relevant_repos_detail: Optional[List[Dict[str, Any]]]  # per-repo summary_points and connections; set only when needs_codebase_search
 
     # Deep Research Agent
-    research_context: Dict[str, Any]      # accumulated research data
     research_iterations: int              # how many research iterations completed
-    max_research_iterations: int          # cap for research iterations
     thinking_log: List[str]               # Alex's thoughts per iteration
     search_history: List[str]             # what was searched, why, and what was found (for next iteration)
     research_files: List[ResearchFile]    # files found during research
@@ -123,11 +107,8 @@ class ConversationState(TypedDict):
 
     # Reasoning process
     reasoning_iterations: List[ReasoningIteration]
-    current_iteration: int
     final_confidence: float
-    solution_found: bool
     reasoning_trace: Optional[str]        # deep_reasoner chain-of-thought (logged)
-    reasoner_decision: Optional[str]      # "ANSWER" | "CLARIFY" | "RETRIEVE_MORE"
     
     # Response generation
     needs_clarification: bool
@@ -142,8 +123,6 @@ class ConversationState(TypedDict):
     doc_sufficient: bool       # True when retrieved docs score above DOCS_ANSWER_THRESHOLD
     # Metadata
     processing_start_time: datetime
-    processing_end_time: Optional[datetime]
-    total_processing_time: Optional[float]  # in seconds
     error: Optional[str]
 
 
@@ -157,7 +136,6 @@ class ConversationRecord:
     user_id: str
     message_text: str
     intent_type: str
-    urgency: str
     response_text: Optional[str]
     confidence: float
     needs_clarification: bool
@@ -214,20 +192,13 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         
         # Intent analysis
         intent_type=None,
-        urgency=None,
-        key_topics=[],
-        technical_terms=[],
         
         # Optional summary/signals (deep_researcher may set)
         problem_summary=None,
-        sub_questions=[],
-        is_ambiguous=False,
         is_conceptual=False,
 
         # Deep Research Agent
-        research_context={},
         research_iterations=0,
-        max_research_iterations=5,
         thinking_log=[],
         search_history=[],
         research_files=[],
@@ -236,11 +207,8 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
 
         # Reasoning
         reasoning_iterations=[],
-        current_iteration=0,
         final_confidence=0.0,
-        solution_found=False,
         reasoning_trace=None,
-        reasoner_decision=None,
         
         # Response
         needs_clarification=False,
@@ -256,7 +224,5 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         
         # Metadata
         processing_start_time=datetime.now(),
-        processing_end_time=None,
-        total_processing_time=None,
         error=None
     )
