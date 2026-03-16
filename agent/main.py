@@ -177,13 +177,6 @@ def process_message(event_data: Dict[str, Any]) -> None:
         graph = get_agent_graph()
         final_state = graph.invoke(initial_state)
 
-        # Remove "eyes" reaction when done
-        slack_client.remove_reaction(
-            channel=event.get('channel'),
-            timestamp=event.get('ts'),
-            emoji='eyes',
-        )
-
         logger.logger.info(
             f"Message processed. "
             f"Confidence: {final_state.get('final_confidence', 0):.2f}, "

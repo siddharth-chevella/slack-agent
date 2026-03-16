@@ -19,7 +19,9 @@ from agent.llm import get_chat_completion
 from agent.config import ABOUT_OLAKE
 
 
-_SOLUTION_SYSTEM_TEMPLATE = """You are Alex, a senior support engineer on the OLake team.
+_SOLUTION_SYSTEM_TEMPLATE = """CRITICAL — Voice: You speak as OLake. When referring to OLake or the team, always use "we"/"our" or "OLake". Never use "they" or "their" for OLake. Example: Bad: "They are faster than other tools." Good: "We are faster than other tools" or "OLake is faster than other tools."
+
+You are Alex, a senior support engineer on the OLake team.
 
 About OLake:
 {about_olake}
@@ -53,12 +55,31 @@ def _build_history_block(state: ConversationState, max_messages: int = 6) -> str
     """Build a short conversation history snippet from previous messages and thread context."""
     lines: List[str] = []
     thread_messages = state.get("thread_context", []) or []
+    # #region debug log
+    try:
+        import json
+        _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
+        _first = thread_messages[0] if thread_messages else {}
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H3", "location": "solution_provider.py:_build_history_block", "message": "building history block", "data": {"thread_messages_count": len(thread_messages), "first_msg_sample_keys": list(_first.keys()) if _first else []}, "timestamp": __import__("time").time() * 1000}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     for msg in thread_messages[-max_messages:]:
-        user = msg.get("user") or msg.get("username") or "user"
-        text = (msg.get("text") or "").strip()
+        user = msg.get("user_id") or msg.get("user") or msg.get("username") or "user"
+        text = (msg.get("message_text") or msg.get("text") or "").strip()
         if not text:
             continue
         lines.append(f"- {user}: {text}")
+    # #region debug log
+    try:
+        import json
+        _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H4", "location": "solution_provider.py:_build_history_block_result", "message": "history block result", "data": {"lines_count": len(lines), "history_preview": (("\n".join(lines[-max_messages:]))[:200] if lines else "(none)"), "has_text_key": bool(thread_messages and (thread_messages[0].get("text") is not None)), "has_message_text_key": bool(thread_messages and (thread_messages[0].get("message_text") is not None))}, "timestamp": __import__("time").time() * 1000}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     if not lines:
         return "(none)"
     return "\n".join(lines[-max_messages:])
@@ -101,6 +122,8 @@ Internal files and code snippets to use for your answer:
 
 Answer the question using the internal files above. If the files do not contain enough information, ask 1-3 short clarifying questions. Do not mention the files explicitly; just answer or ask.
 
+Use "we"/"our" or "OLake" when referring to OLake — never "they" or "their".
+
 Now write the final Slack message text."""
 
     response = await get_chat_completion(
@@ -129,12 +152,6 @@ def solution_provider(state: ConversationState) -> ConversationState:
 
     try:
         slack_client = create_slack_client()
-
-        slack_client.add_reaction(
-            channel=channel_id,
-            timestamp=state["message_ts"],
-            emoji="white_check_mark",
-        )
 
         # When DeepResearcher hit an error it sets research_error + response_text; send that instead of calling LLM
         if state.get("research_error") and state.get("response_text"):
@@ -190,21 +207,21 @@ def solution_provider(state: ConversationState) -> ConversationState:
         print("solution_provider: final_message 02:", final_message)
         state["response_text"] = final_message
 
-        # blocks = slack_client.format_response_blocks(
-        #     response_text=final_message,
-        #     confidence=state.get("research_confidence", 0.0),
-        #     docs_cited=None,
-        #     is_clarification=False,
-        #     is_escalation=False,
-        # )
-        # state["response_blocks"] = blocks
+        blocks = slack_client.format_response_blocks(
+            response_text=final_message,
+            confidence=state.get("research_confidence", 0.0),
+            docs_cited=None,
+            is_clarification=False,
+            is_escalation=False,
+        )
+        state["response_blocks"] = blocks
 
-        # slack_client.send_message(
-        #     channel=channel_id,
-        #     text=final_message,
-        #     thread_ts=thread_ts,
-        #     blocks=blocks,
-        # )
+        slack_client.send_message(
+            channel=channel_id,
+            text=final_message,
+            thread_ts=thread_ts,
+            blocks=blocks,
+        )
 
         logger.logger.info(f"[SolutionProvider] sent answer len={len(final_message)}")
 
