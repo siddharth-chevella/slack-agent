@@ -172,7 +172,8 @@ class GitHubRepoTracker:
     
     def sync_repo(self, name: str) -> Dict[str, Any]:
         """
-        Sync a repository (pull latest changes).
+        Sync a repository via git fetch upstream (no GitHub API).
+        Ensures upstream remote exists, fetches from it, then merges into current branch.
         
         Args:
             name: Repository name
@@ -191,29 +192,59 @@ class GitHubRepoTracker:
             log.info(f"Repository '{name}' not found, cloning...")
             return self.clone_repo(name)
         
-        # Pull latest changes
-        cmd = f"cd {repo_path} && git pull"
+        # Ensure upstream remote exists (use same URL as origin if missing)
+        check_remote = self.terminal.execute("git remote get-url upstream", working_dir=repo_path)
+        if not check_remote.success:
+            add_upstream = self.terminal.execute(
+                f"git remote add upstream {repo.url}",
+                working_dir=repo_path,
+            )
+            if not add_upstream.success:
+                error_msg = add_upstream.stderr or add_upstream.error_message
+                log.error(f"Failed to add upstream remote for {name}: {error_msg}")
+                return {
+                    "success": False,
+                    "message": f"Failed to add upstream remote: {error_msg}",
+                }
+            log.info(f"Added upstream remote for {name}")
         
-        log.info(f"Syncing {name}: {cmd}")
-        
-        result = self.terminal.execute(cmd)
-        
-        if result.success:
-            repo.last_sync = datetime.now()
-            self._save_config()
-            log.info(f"Successfully synced {name}")
-            return {
-                "success": True,
-                "message": f"Synced {name}",
-                "output": result.stdout[:500] if result.stdout else "No changes",
-            }
-        else:
-            error_msg = result.stderr or result.error_message
-            log.error(f"Failed to sync {name}: {error_msg}")
+        # Sync via fetch upstream and merge (no GitHub API)
+        branch = repo.branch or "main"
+        fetch_result = self.terminal.execute("git fetch upstream", working_dir=repo_path)
+        if not fetch_result.success:
+            error_msg = fetch_result.stderr or fetch_result.error_message
+            log.error(f"Failed to fetch upstream for {name}: {error_msg}")
             return {
                 "success": False,
-                "message": f"Failed to sync: {error_msg}",
+                "message": f"Failed to fetch upstream: {error_msg}",
             }
+        merge_result = self.terminal.execute(
+            f"git merge upstream/{branch}",
+            working_dir=repo_path,
+        )
+        if not merge_result.success:
+            # Try master if main doesn't exist
+            if branch == "main":
+                merge_result = self.terminal.execute(
+                    "git merge upstream/master",
+                    working_dir=repo_path,
+                )
+            if not merge_result.success:
+                error_msg = merge_result.stderr or merge_result.error_message
+                log.error(f"Failed to merge upstream for {name}: {error_msg}")
+                return {
+                    "success": False,
+                    "message": f"Failed to merge upstream: {error_msg}",
+                }
+        
+        repo.last_sync = datetime.now()
+        self._save_config()
+        log.info(f"Successfully synced {name}")
+        return {
+            "success": True,
+            "message": f"Synced {name}",
+            "output": merge_result.stdout[:500] if merge_result.stdout else "No changes",
+        }
     
     def sync_all(self) -> Dict[str, Any]:
         """

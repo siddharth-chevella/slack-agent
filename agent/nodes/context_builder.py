@@ -5,7 +5,7 @@ Key behaviors:
   - Fetches thread messages from both the DB and Slack API
   - Annotates each thread message with `is_bot` flag (True if sent by this OLake agent)
   - Sets state["org_member_replied"] = True if any org team member has posted in the thread
-    (detection uses slack_name matching via team_resolver)
+    (detection uses slack_name matching via agent.team)
 """
 
 from typing import Dict, Any, List
@@ -15,11 +15,7 @@ from agent.persistence import get_database
 from agent.slack_client import create_slack_client
 from agent.logger import get_logger, EventType
 from agent.config import Config
-from agent.team_resolver import (
-    is_org_member_by_name,
-    is_org_member_by_id,
-    get_bot_user_id,
-)
+from agent.team import is_org_member_by_name, is_org_member_by_id, get_bot_user_id
 
 
 def build_context(state: ConversationState) -> ConversationState:
@@ -140,6 +136,18 @@ def build_context(state: ConversationState) -> ConversationState:
         state["thread_context"] = thread_context
         state["org_member_replied"] = org_member_replied
 
+        # #region debug log
+        try:
+            import json
+            _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
+            _first = thread_context[0] if thread_context else {}
+            _keys = list(_first.keys()) if _first else []
+            with open(_log_path, "a") as _f:
+                _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H1", "location": "context_builder.py:after_set_thread_context", "message": "thread_context set", "data": {"thread_ts": thread_ts, "thread_context_count": len(thread_context), "first_msg_keys": _keys}, "timestamp": __import__("time").time() * 1000}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         # ----------------------------------------------------------------
         # Logging
         # ----------------------------------------------------------------
@@ -175,5 +183,14 @@ def build_context(state: ConversationState) -> ConversationState:
         state["previous_messages"] = []
         state["thread_context"] = []
         state["org_member_replied"] = False
+        # #region debug log
+        try:
+            import json
+            _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
+            with open(_log_path, "a") as _f:
+                _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H2", "location": "context_builder.py:except_fallback", "message": "context_builder exception fallback", "data": {"error": str(e)}, "timestamp": __import__("time").time() * 1000}) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
     return state

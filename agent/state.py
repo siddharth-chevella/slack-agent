@@ -19,14 +19,6 @@ class IntentType(Enum):
     UNKNOWN = "unknown"
 
 
-class UrgencyLevel(Enum):
-    """Urgency levels for issues."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
 @dataclass
 class UserProfile:
     """User profile with interaction history."""
@@ -44,16 +36,6 @@ class UserProfile:
     
 
 @dataclass
-class RetrievedDocument:
-    """A retrieved documentation chunk."""
-    title: str
-    content: str
-    url: str
-    relevance_score: float
-    source_type: str  # "docs", "github", "stackoverflow", etc.
-
-
-@dataclass
 class ResearchFile:
     """A file retrieved during codebase research."""
     path: str
@@ -63,6 +45,7 @@ class ResearchFile:
     source: str  # "ripgrep" | "ast-grep"
     language: str
     retrieval_reason: str  # Why this file was retrieved (small summary)
+    search_pattern: Optional[str] = None  # Pattern used for retrieval (e.g. ripgrep/ast-grep pattern)
 
 
 @dataclass
@@ -102,45 +85,30 @@ class ConversationState(TypedDict):
     
     # Intent analysis
     intent_type: Optional[IntentType]
-    urgency: Optional[UrgencyLevel]
-    key_topics: List[str]
-    technical_terms: List[str]
     
-    # Documentation search
-    search_queries: List[str]
-    retrieved_docs: List[RetrievedDocument]
-    docs_relevance_score: float
-
     # Optional summary/signals (set by deep_researcher when present in LLM output)
     problem_summary: Optional[str]        # one-sentence restatement of the issue
-    sub_questions: List[str]              # (unused; kept for compatibility)
-    is_ambiguous: bool                    # (unused; kept for compatibility)
     is_conceptual: bool                   # True if question can be answered without code search
 
-    # Iterative retrieval loop
-    retrieval_iterations: int             # how many retrieval rounds have run
-    max_retrieval_iterations: int         # cap (default 3)
-    new_search_queries: List[str]         # queries from reasoner for next retrieval
-    retrieval_history: List[str]          # all queries run so far (dedup across rounds)
-    retrieval_summaries: List[Dict[str, Any]]  # summary of what was retrieved each iteration
+    # OLake context (summarised for this turn by olake_context_summariser when used)
+    needs_codebase_search: Optional[bool]  # True if question requires codebase search; False = generic, go straight to solution_provider
+    about_olake_summary: Optional[str]   # focused excerpt of ABOUT_OLAKE for this query; set only when needs_codebase_search; else empty
+    relevant_repos: Optional[List[str]]  # repo names to prefer for this question; set only when needs_codebase_search; else empty
 
     # Deep Research Agent
-    research_context: Dict[str, Any]      # accumulated research data
     research_iterations: int              # how many research iterations completed
-    max_research_iterations: int          # cap for research iterations
     thinking_log: List[str]               # Alex's thoughts per iteration
     search_history: List[str]             # what was searched, why, and what was found (for next iteration)
     research_files: List[ResearchFile]    # files found during research
+    research_files_summary: Optional[str] # LLM-generated summary of research_files (for planner on next iteration)
+    eval_reason: Optional[str]            # last evaluator reason (CONTINUE/DONE) so planner knows why we continue
     research_done: bool                   # True when research is complete
-    research_confidence: float            # confidence in gathered context (0-1)
+    research_confidence: float            # confidence in gathered context (0-1); used for routing
 
     # Reasoning process
     reasoning_iterations: List[ReasoningIteration]
-    current_iteration: int
     final_confidence: float
-    solution_found: bool
     reasoning_trace: Optional[str]        # deep_reasoner chain-of-thought (logged)
-    reasoner_decision: Optional[str]      # "ANSWER" | "CLARIFY" | "RETRIEVE_MORE"
     
     # Response generation
     needs_clarification: bool
@@ -153,11 +121,8 @@ class ConversationState(TypedDict):
     # Org-member guard
     org_member_replied: bool  # True when an org team member is in the thread → bot silences
     doc_sufficient: bool       # True when retrieved docs score above DOCS_ANSWER_THRESHOLD
-    rag_service_available: Optional[bool]  # None=unknown, True=up, False=using keyword fallback
     # Metadata
     processing_start_time: datetime
-    processing_end_time: Optional[datetime]
-    total_processing_time: Optional[float]  # in seconds
     error: Optional[str]
 
 
@@ -171,7 +136,6 @@ class ConversationRecord:
     user_id: str
     message_text: str
     intent_type: str
-    urgency: str
     response_text: Optional[str]
     confidence: float
     needs_clarification: bool
@@ -228,32 +192,13 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         
         # Intent analysis
         intent_type=None,
-        urgency=None,
-        key_topics=[],
-        technical_terms=[],
         
-        # Documentation search
-        search_queries=[],
-        retrieved_docs=[],
-        docs_relevance_score=0.0,
-
         # Optional summary/signals (deep_researcher may set)
         problem_summary=None,
-        sub_questions=[],
-        is_ambiguous=False,
         is_conceptual=False,
 
-        # Iterative retrieval
-        retrieval_iterations=0,
-        max_retrieval_iterations=3,
-        new_search_queries=[],
-        retrieval_history=[],
-        retrieval_summaries=[],
-
         # Deep Research Agent
-        research_context={},
         research_iterations=0,
-        max_research_iterations=5,
         thinking_log=[],
         search_history=[],
         research_files=[],
@@ -262,11 +207,8 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
 
         # Reasoning
         reasoning_iterations=[],
-        current_iteration=0,
         final_confidence=0.0,
-        solution_found=False,
         reasoning_trace=None,
-        reasoner_decision=None,
         
         # Response
         needs_clarification=False,
@@ -279,11 +221,8 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         # Org-member guard
         org_member_replied=False,
         doc_sufficient=False,
-        rag_service_available=None,
-
+        
         # Metadata
         processing_start_time=datetime.now(),
-        processing_end_time=None,
-        total_processing_time=None,
         error=None
     )

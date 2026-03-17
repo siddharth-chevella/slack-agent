@@ -120,9 +120,16 @@ class SlackClient:
             
             return response
         except SlackApiError as e:
+            err = e.response.get("error", "unknown")
+            needed = e.response.get("needed") or ""
+            if isinstance(needed, list):
+                needed = ", ".join(needed)
+            msg = f"Failed to send message: {err}"
+            if needed:
+                msg += f". Add scope(s) in Slack app: {needed}"
             self.logger.log_error(
                 error_type="SlackMessageError",
-                error_message=f"Failed to send message: {e.response['error']}",
+                error_message=msg,
                 channel_id=channel
             )
             raise

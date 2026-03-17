@@ -1,13 +1,10 @@
 """
 Deep Researcher Node — Optimized for ripgrep + ast-grep (no vector/semantic search).
 
-Alex, a senior OLake support engineer, plans and runs literal text (ripgrep) and
-structural code (ast-grep) searches. Output is tuned for these tools: ripgrep_patterns
-(identifiers, config keys, error strings) and ast_grep_patterns (func/class/type names).
-
-Validation: After changes, run test_agent.py with a real question (e.g. snapshot
-deletion), inspect retrieved files and the final answer, and iterate on prompts or
-pattern execution if quality is off.
+Alex, a senior OLake support engineer, plans and runs searches via SearchParams.
+The model returns search_params (array of param dicts); each is passed to
+CodebaseSearchEngine.search() which runs both ripgrep and ast-grep and returns
+deduplicated results.
 """
 
 from __future__ import annotations
@@ -15,15 +12,16 @@ import asyncio
 import json
 import re
 import logging
+import sys
+import traceback
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
-from agent.state import ConversationState, ResearchFile, ReasoningIteration
-from agent.llm import get_chat_completion, stream_chat_completion
+from agent.state import ConversationState, ResearchFile
+from agent.llm import get_chat_completion
 from agent.logger import get_logger
-from agent.config import Config, OLAKE_CONTEXT
-from agent.codebase_search import CodebaseSearchEngine
-from agent.github_repo_tracker import GitHubRepoTracker
+from agent.config import Config, ABOUT_OLAKE, ABOUT_OLAKE_REPO_INFO
+from agent.codebase_search import CodebaseSearchEngine, SearchParams
 from agent.persistence import get_database
 
 log = logging.getLogger(__name__)
@@ -32,75 +30,123 @@ log = logging.getLogger(__name__)
 # System Prompt — Optimized for ripgrep + ast-grep (no vector/semantic search)
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = f"""You are Alex, a senior support engineer at OLake/Datazip.
+_SYSTEM_PROMPT_TEMPLATE = """You are Alex, a senior support engineer at OLake/Datazip. Think and reason explicitly in first person: use "I" in your reasoning (e.g. "I need to search for ...", "I will look for ...", "I should target ...").
 
 About OLake:
-{OLAKE_CONTEXT.strip()}
+{about_olake}
 
-Your job: Research the codebase using ONLY two tools — ripgrep (text/regex in files) and ast-grep (code structure). There is NO vector search, NO semantic search, NO keyword embedding. Results come only from literal text matches and structural code patterns.
+Repositories available for search (each is searched individually; use this to target the right repo):
+{about_olake_repo_info}
 
-HOW THE TOOLS WORK:
-1. RIPGREP — Searches for literal text or regex inside source files. A pattern matches if that exact text (or regex) appears in the file. Use for: identifiers (ExpireSnapshot, expire_snapshots), config keys (snapshot.retention), error strings, package names, comments. NOT for natural language questions or vague concepts — only strings that actually appear in code/docs.
-2. AST-GREP — Searches code structure: function names, class names, method calls. The pattern is code-like: "func ExpireSnapshot" (Go), "def expire_snapshots" (Python), "class SnapshotManager". Primary language for OLake is Go. Use for finding where a function is defined or a type is used.
+Your job: Research the codebase using ONE search tool with standardized parameters (SearchParams). There is NO vector search, NO semantic search, NO keyword embedding. Results come only from literal text matches and structural code patterns.
 
-WHAT TO OUTPUT:
-- ripgrep_patterns: List of strings that could appear literally in the codebase. Think "what would I grep for?" Examples: "expire_snapshots", "ExpireSnapshot", "snapshot", "retention", "retain", "snapshot.*expire". Use identifiers, config names, error messages — not full sentences.
-- ast_grep_patterns: List of structural patterns. For Go use "func" (not "function"): "func ExpireSnapshot", "func expireSnapshots", "type SnapshotManager". Keep patterns short (one symbol per pattern).
-- file_types: Prefer ["go"] for OLake; add "python", "yaml", "md" if you need config/docs.
+PREFER REGEX, ONE SEARCH PER REPO: Use regex as the pattern to match all related terms in a single search per repo instead of multiple iterations on the same repo. Combine identifiers with | (OR), e.g. "ExpireSnapshot|expireSnapshot|ExpireSnapshots|retention", so one SearchParams per repo gathers all relevant hits at once. Avoid running several separate searches on the same repo—express everything you need for that repo in one regex pattern.
+
+HOW THE TOOL WORKS:
+The search tool accepts a SearchParams object and routes internally to either ripgrep (text/regex) or ast-grep (code structure). You control which by how you phrase the pattern:
+- REGEX patterns (preferred): Use regex to match multiple variants in one go. Examples: "ExpireSnapshot|expireSnapshot|ExpireSnapshots", "snapshot\\.retention|retention_days", "topic.*retention|topic_retention", "func.*Snapshot|type.*Snapshot". Ripgrep supports full regex; use it to cover a whole topic in one search per repo.
+- STRUCTURAL patterns: code-like snippets for definitions/usages when needed. Use for: "func ExpireSnapshot" (Go), "type SnapshotManager". Primary language for OLake is Go.
+
+SearchParams fields:
+- pattern: the search string (literal, regex, or structural code snippet)
+- repo: which repo to search ("olake", "olake-ui", "olake-docs", "olake-helm", "olake-fusion")
+- max_results: cap on results (default 50)
+- file_types: list of extensions to filter, e.g. ["go"], ["go", "yaml"], ["md"]
+- lang: language hint for structural/ast search (e.g. "go"); if None, inferred from file_types
+- exclude_dirs: list of dirs to skip, e.g. ["vendor", "testdata"]
+- context_lines: lines of context around each match (default 2)
+
+GO/OLAKE NAMING — CRITICAL: OLake is written in Go. Go uses PascalCase for exported types/functions (ExpireSnapshot, DeleteSnapshots) and camelCase for unexported (expireSnapshot). Python-style snake_case will NOT match. Always use patterns that could literally appear in Go code: "ExpireSnapshot", "expireSnapshot", "Snapshot", "retention". Emit both PascalCase and camelCase variants when unsure.
+
+PATTERN QUALITY RULES (apply to all patterns regardless of tool):
+- Use compound terms over single words: "partition_regex" not "partition", "topic.*retention" not "retention"
+- Weak patterns match many unrelated areas; strong patterns stay domain-relevant
+- Examples of weak vs strong:
+    WEAK "partition" → matches Kafka partitions, drivers, tests, unrelated code
+    STRONG "PartitionRegex", "partition_regex" → scoped to the actual feature
+
+    WEAK "retention" → matches snapshot retention, logs, many modules
+    STRONG "topic.*retention", "topic_retention" → scoped to topic config
+
+    WEAK "lag" → matches any lag (network, replication, generic)
+    STRONG "wal.*lag", "pgoutput.*lag", "replication.*lag" → scoped to CDC/Postgres
 
 STRATEGY:
-- Start with 2-4 ripgrep patterns (identifiers and terms from the user question, converted to code-like strings). Add 1-2 ast_grep patterns to find function/type definitions.
-- If the user asks "how do I X?", think: what function or config would implement X? Output those names as patterns.
-- If the user asks "where is Y?", output Y and related identifiers (e.g. YManager, NewY, y_config).
-- Use SEARCH HISTORY in the prompt to avoid repeating failed or irrelevant searches; plan the next search based on what was already searched and what was found.
-- If a word could match many unrelated areas of the codebase, narrow by using the full phrase the user used, compound terms (e.g. "partition_regex" not just "partition"), or patterns that include the question's domain so results stay relevant.
-
-FEW-SHOT EXAMPLES (learn the pattern: avoid single ambiguous words; use phrases/compound terms that reflect what the user is asking about):
-
-Example 1 — User: "How can I apply partition regex to all streams at once?"
-  Weak: ripgrep ["partition"] → matches Kafka partitions, drivers, tests, etc. Wrong domain.
-  Strong: ripgrep ["partition_regex", "partition regex", "stream"] — use the full concept and context so matches are about stream/table config, not other features.
-
-Example 2 — User: "Where is topic retention configured?"
-  Weak: ripgrep ["retention"] → matches snapshot retention, log retention, many modules.
-  Strong: ripgrep ["topic.*retention", "topic_retention", "retention"], ast_grep ["retention"] — combine with "topic" so results are about topic config.
-
-Example 3 — User: "Postgres CDC WAL lag too high"
-  Weak: ripgrep ["lag"] → matches any lag (network, replication, generic).
-  Strong: ripgrep ["wal", "pgoutput", "lag", "replication"] — keep context (WAL, postgres) so results are CDC/replication-related.
+- Use regex to combine related terms (identifiers, config keys, error strings) into one pattern per repo so a single search covers the topic.
+- Prefer one SearchParams per repo with a regex like "TermA|termA|TermB|termB" over multiple SearchParams on the same repo.
+- Use SEARCH HISTORY to avoid repeating failed searches.
+- If the user asks "how do I X?", think: what function or config implements X? Put all related names in one regex for that repo.
+- If the user asks "where is Y?", use Y and related identifiers (YManager, NewY) in one regex per repo.
 
 OUTPUT FORMAT (valid JSON only, no markdown fences):
 {{
-  "thinking": "Your reasoning: what you need and why these patterns",
-  "search_intent": "One or two lines: what you are searching and why. Example: Checking catalog and StreamMetadata for partition_regex so I can answer whether it applies to all streams.",
-  "ripgrep_patterns": ["pattern1", "pattern2"],
-  "ast_grep_patterns": ["func ExpireSnapshot", "type SnapshotManager"],
-  "file_types": ["go", "yaml"],
+  "thinking": "First-person reasoning: e.g. I need to search for ... ; I will use this regex because ...",
+  "search_intent": "One or two lines: what you are searching and why (can use I).",
+  "search_params": [
+    {{
+      "pattern": "ExpireSnapshot|expireSnapshot|ExpireSnapshots|retention",
+      "repo": "olake",
+      "max_results": 50,
+      "file_types": ["go"],
+      "lang": "go",
+      "exclude_dirs": null,
+      "context_lines": 2
+    }}
+  ],
   "problem_summary": "optional one-sentence restatement of the user question",
   "is_conceptual": false
 }}
 
 RULES:
-- search_intent is REQUIRED every time: a short 1-2 lines description of what you're searching and why (e.g. "Checking X so I can Y" or "Searching for Z to find where it's configured."). This is logged and shown to you in the next iteration.
-- Max 5 ripgrep_patterns and 3 ast_grep_patterns per iteration.
-- Patterns must be strings that could literally appear in source (ripgrep) or structural code snippets (ast-grep). No questions, no sentences.
-- If you already have many relevant files, output empty arrays to signal you are ready to evaluate (system will then ask CONTINUE/DONE).
-- Set is_conceptual to true only for general-knowledge questions (e.g. "What is OLake?") that need no code search; then leave patterns empty.
+- search_intent is REQUIRED every time: 1-2 lines on what you're searching and why.
+- Prefer richer regex so one pattern covers many related matches per repo — e.g. "(snapshot|retention)[_.]?\\w*\\s*[:=]" matches config keys (snapshot_retention, retention_days, snapshot.retention) at assignment or definition sites in one search; use grouping, optional parts ([_.]?), and character classes (\\w, \\s) to capture variants without listing every token. Max 5 SearchParams per iteration (ideally one per repo).
+- Patterns must be valid regex or structural code snippets. No full sentences or questions.
+- If you already have sufficient findings, output empty search_params [] to signal readiness to evaluate.
+- Set is_conceptual to true only for general-knowledge questions (e.g. "What is OLake?") that need no code search; then leave search_params empty.
 """
+
+
+def _system_prompt(about_olake: str, about_olake_repo_info: str = "") -> str:
+    repo_info = (about_olake_repo_info or ABOUT_OLAKE_REPO_INFO or "").strip()
+    return _SYSTEM_PROMPT_TEMPLATE.format(about_olake=about_olake, about_olake_repo_info=repo_info)
+
+# Prompt for file summarization (LLM summarizes each file; no truncation).
+# The files are passed to this prompt in the USER message: for each file we send path, pattern used for retrieval, and full content (see _build_files_summary).
+_SUMMARIZE_FILES_SYSTEM = """You summarize codebase files so an evaluator can decide if enough context exists to answer a user question.
+
+About OLake:
+{about_olake}
+
+Repositories (for context):
+{about_olake_repo_info}
+
+RULES:
+1. Understand the USER QUESTION intent first. Use it to decide whether each file is relevant. If a file is irrelevant to the question, do NOT include it in your output (skip it).
+2. For each relevant file, output file_path and a concise descriptive summary in bullet points. Example format:
+   - What the file does (e.g. "Validates JWT tokens using Clerk (jose library)")
+   - Key behavior (e.g. "Middleware applied globally except /public/* routes")
+   - Important details (e.g. "On failure: returns 401, logs to Sentry with user_id")
+   - Dependencies if clear (e.g. "Depends on: config/env.py (CLERK_SECRET_KEY)")
+3. Every sentence MUST be grounded in the file content or the question. Do NOT guess or make up information. If you are unsure about something, state it clearly (e.g. "Unclear whether...").
+4. You receive the full file content (no truncation). Base your summary only on what is actually in the file.
+
+OUTPUT FORMAT: Return ONLY a single JSON object. No markdown, no trailing backticks, no explanation before or after. Valid JSON only:
+{{"summaries": [{{"file_path": "<path>", "summary": "<bullet summary>"}}, ...]}}
+
+Omit any file that is irrelevant to the user question from the summaries array."""
 
 # Prompt for post-search evaluation: analyze retrieved data and decide if enough to answer
 _EVALUATE_PROMPT = """You are evaluating whether the retrieved codebase context is enough to answer the user's question accurately.
 
 USER QUESTION: "{message_text}"
 
-FILES FOUND (path, why retrieved, and a snippet):
+FILES FOUND (path and concise summary per file):
 {files_summary}
-
 
 Analyze the retrieved data: Does it contain the right modules, config, or docs to answer the question? If key info is missing or the files are from the wrong domain, say CONTINUE so the agent can search again with a better target.
 
 Reply with JSON only (no markdown):
-{{ "decision": "CONTINUE" | "DONE", "reason": "One sentence why." }}
+{{ "reason": "One sentence why.", "decision": "CONTINUE" | "DONE" }}
 
 - DONE: I have enough (right area, relevant code/config) to answer accurately.
 - CONTINUE: I need more (missing key files, wrong domain, or too few relevant matches).
@@ -113,6 +159,27 @@ Reply with JSON only (no markdown):
 
 _PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.DOTALL)
 
+# Summarizer: max total content chars per LLM call (avoid context overflow); batch size when batching
+_SUMMARIZE_MAX_CHARS = 80_000
+_SUMMARIZE_BATCH_SIZE = 5
+
+
+def _parse_summarizer_json(text: str | None) -> List[Dict[str, Any]]:
+    """Parse summarizer LLM response: expect JSON only (no markdown fences). Returns list of {file_path, summary}."""
+    if not text or not text.strip():
+        return []
+    raw = text.strip()
+    # Remove common wrappers: ```json ... ``` or ``` ... ```
+    raw = _PARSE_RE_FENCE.sub("", raw).strip()
+    try:
+        obj = json.loads(raw)
+        summaries = obj.get("summaries")
+        if isinstance(summaries, list):
+            return [{"file_path": str(s.get("file_path", "")), "summary": str(s.get("summary", ""))} for s in summaries]
+        return []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
 
 def _parse_json(text: str | None) -> dict:
     """Parse LLM JSON with progressive fallbacks for truncated responses."""
@@ -121,11 +188,57 @@ def _parse_json(text: str | None) -> dict:
     text = text.strip()
     text = _PARSE_RE_FENCE.sub("", text).strip()
 
+    
     # 1. Happy path
     try:
+        print("deep_researcher: happy path:", text)
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+
+    # 1b. Prose-then-JSON: find first { and parse a single JSON object from there (H1)
+    first_brace = text.find("{")
+    if first_brace >= 0:
+        # Find matching closing brace; skip content inside double-quoted strings (JSON uses ")
+        depth = 0
+        i = first_brace
+        end = -1
+        in_double = False
+        escape = False
+        while i < len(text):
+            c = text[i]
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if in_double:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_double = False
+                i += 1
+                continue
+            if c == '"':
+                in_double = True
+                i += 1
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+            i += 1
+        if end >= 0:
+            json_slice = text[first_brace : end + 1]
+            try:
+                obj = json.loads(json_slice)
+                print("deep_researcher:", obj)
+                if isinstance(obj, dict) and ("search_params" in obj or "thinking" in obj or "search_intent" in obj):
+                    return obj
+            except json.JSONDecodeError:
+                pass
 
     # 2. Truncation repair
     repaired = text
@@ -135,6 +248,7 @@ def _parse_json(text: str | None) -> dict:
             repaired += '"'
         repaired += '}'
     try:
+        print("deep_researcher: repaired:", repaired)
         return json.loads(repaired)
     except json.JSONDecodeError:
         pass
@@ -160,6 +274,14 @@ def _parse_json(text: str | None) -> dict:
         result.setdefault("search_queries", [])
         return result
 
+    # 4. Truncated researcher response: we have "thinking" and/or "search_intent" but no valid JSON — return partial so the loop can continue (e.g. fallback search)
+    if "thinking" in result or "search_intent" in result:
+        result.setdefault("thinking", "(response truncated)")
+        result.setdefault("search_intent", "Searching for relevant code.")
+        result.setdefault("search_params", [])
+        result.setdefault("problem_summary", "")
+        return result
+
     raise ValueError(f"Cannot parse LLM JSON even after repair: {text[:200]!r}")
 
 
@@ -167,197 +289,153 @@ def _parse_json(text: str | None) -> dict:
 # Deep Researcher Node
 # ---------------------------------------------------------------------------
 
+def _dict_to_search_params(d: Dict[str, Any], default_repo: str = "olake") -> SearchParams:
+    """Build SearchParams from LLM response dict (search_params item)."""
+    return SearchParams(
+        pattern=str(d.get("pattern", "")).strip() or ".",
+        repo=d.get("repo") or default_repo,
+        max_results=int(d.get("max_results", 50)),
+        file_types=d.get("file_types"),
+        lang=d.get("lang"),
+        exclude_dirs=d.get("exclude_dirs"),
+        context_lines=int(d.get("context_lines", 2)),
+    )
+
+
 class DeepResearcher:
     """
     Alex - Senior OLake Support Engineer
 
     Thinks out loud while researching the codebase iteratively.
     Returns all gathered context with retrieval reasons.
+    Uses a single CodebaseSearchEngine; repo is specified per search via SearchParams.
     """
 
     def __init__(self):
-        # Find the GitHub repos directory
-        tracker = GitHubRepoTracker()
-        search_dir = tracker.repos_dir or Path.cwd()
-        
-        self.search_engine = CodebaseSearchEngine(working_dir=search_dir)
+        self.search_engine = CodebaseSearchEngine()
         self.max_iterations = Config.MAX_RESEARCH_ITERATIONS
         self.max_files = Config.MAX_CONTEXT_FILES
         self.min_confidence = Config.MIN_CONFIDENCE_TO_STOP
     
     def _build_user_prompt(self, state: ConversationState) -> str:
-        """Build the user prompt: raw message + search history + files found so far."""
+        """Build the user prompt: raw message + search history + files found so far (summaries when available) + why continue."""
         message_text = state["message_text"]
         search_history = state.get("search_history", [])
         research_files = state.get("research_files", [])
         iteration = state.get("research_iterations", 0)
-        
+        eval_reason = (state.get("eval_reason") or "").strip()
+        research_files_summary = (state.get("research_files_summary") or "").strip()
+
         # Search history: what was searched, why, and what was found (so the agent knows what to try next and what to avoid)
         history_block = ""
         if search_history:
             history_block = "\n\nSEARCH HISTORY (what was searched, why, and what was found — use this to plan the next search and avoid repeating):\n" + "\n".join(
                 f"  {i+1}. {entry}" for i, entry in enumerate(search_history)
             )
-        
-        # Files found so far: path, reason, and short snippet so the agent can judge relevance
+
+        # Files found so far: use LLM-generated summaries when available (from last evaluation); else path + pattern + longer snippet (no 180-char truncation)
         files_context = ""
         if research_files:
             files_context = "\n\nFILES FOUND SO FAR:\n"
-            for i, f in enumerate(research_files[:12], 1):
-                snippet = ((f.content or "").strip()[:180].replace("\n", " "))
-                files_context += f"  {i}. {f.path}\n     Why: {f.retrieval_reason}\n     Snippet: {snippet}...\n"
+            if research_files_summary:
+                files_context += research_files_summary
+            else:
+                for i, f in enumerate(research_files[:12], 1):
+                    pattern = getattr(f, "search_pattern", None) or ""
+                    snippet = ((f.content or "").strip()[:400].replace("\n", " "))
+                    files_context += f"  {i}. {f.path}\n     Pattern: {pattern}\n     Snippet: {snippet}...\n"
             if len(research_files) > 12:
-                files_context += f"  ... and {len(research_files) - 12} more\n"
-        
+                files_context += f"\n  ... and {len(research_files) - 12} more\n"
+
+        continue_block = ""
+        if eval_reason:
+            continue_block = f"\n\nLAST EVALUATION: CONTINUE — {eval_reason}\nUse this to decide what to search next (or output empty search_params [] if we now have enough)."
+
         return f"""USER MESSAGE: "{message_text}"
 {history_block}
 
 CURRENT RESEARCH ITERATION: {iteration}/{self.max_iterations}
 FILES FOUND: {len(research_files)}
 {files_context}
+{continue_block}
 
-Analyze the question and the search history. Decide what to search next (or output empty patterns if we have enough to evaluate). Output JSON with search_intent, thinking, and patterns."""
-    
-    def _execute_searches(
-        self,
-        *,
-        ripgrep_patterns: Optional[List[str]] = None,
-        ast_grep_patterns: Optional[List[str]] = None,
-        fallback_queries: Optional[List[str]] = None,
-        fallback_strategy: str = "auto",
-        file_types: Optional[List[str]] = None,
-        thinking: str = "",
-    ) -> List[ResearchFile]:
-        """
-        Execute searches using ripgrep and ast-grep patterns.
-        Prefers ripgrep_patterns + ast_grep_patterns; falls back to fallback_queries if needed.
-        """
-        results: List[ResearchFile] = []
-        primary_lang = (file_types or ["go"])[0]
+Analyze the question, search history, and files above. Decide what to search next (or output empty patterns if we have enough to evaluate). Output JSON with search_intent, thinking, and patterns."""
 
-        # New path: explicit ripgrep + ast-grep patterns
-        if ripgrep_patterns or ast_grep_patterns:
-            for pattern in (ripgrep_patterns or [])[:5]:
-                if not (pattern and pattern.strip()):
-                    continue
-                query_lower = pattern.lower().strip()
-                if "driver" in query_lower:
-                    try:
-                        find_result = self.search_engine.terminal.execute(
-                            "find . -type d -name drivers",
-                            working_dir=self.search_engine.working_dir,
-                        )
-                        if find_result.success and find_result.stdout:
-                            drivers_dir = find_result.stdout.strip().split("\n")[0]
-                            if drivers_dir:
-                                ls_result = self.search_engine.terminal.execute(
-                                    f"ls -1 {drivers_dir}",
-                                    working_dir=self.search_engine.working_dir,
-                                )
-                                if ls_result.success and ls_result.stdout:
-                                    content = f"Drivers: {drivers_dir}\n\nSubdirs:\n{ls_result.stdout}"
-                                    from agent.state import ResearchFile
-                                    results.append(ResearchFile(
-                                        path="drivers/ (directory structure)",
-                                        content=content[:5000],
-                                        matches=ls_result.stdout.strip().split("\n")[:30],
-                                        relevance_score=0.95,
-                                        source="ripgrep",
-                                        language="directory",
-                                        retrieval_reason=f"Found while searching for: {pattern}",
-                                    ))
-                                    log.info("[DeepResearcher] Found drivers dir")
-                    except Exception as e:
-                        log.debug(f"Directory search failed: {e}")
-                    continue
-                # Ripgrep text search
-                query_results = self.search_engine.search_text(
-                    pattern, file_types=file_types, max_results=10,
-                )
-                for rf in query_results:
-                    rf.retrieval_reason = f"Found while searching for: {pattern}"
-                results.extend(query_results)
-
-            # Ast-grep structural search (normalize Go: "function" -> "func")
-            for pattern in (ast_grep_patterns or [])[:3]:
-                if not (pattern and pattern.strip()):
-                    continue
-                p = pattern.strip()
-                if primary_lang == "go" and p.lower().startswith("function "):
-                    p = "func " + p[9:]
-                try:
-                    query_results = self.search_engine.search_ast(
-                        p, lang=primary_lang, max_results=10,
-                    )
-                    for rf in query_results:
-                        rf.retrieval_reason = f"Found while searching for: {pattern}"
-                    results.extend(query_results)
-                except Exception as e:
-                    log.warning(f"ast-grep pattern '{p[:50]}' failed: {e}")
-
-        # Fallback: legacy search_queries
-        if not results and fallback_queries:
-            for query in fallback_queries[:4]:
-                ql = query.lower()
-                if fallback_strategy == "ast-grep" or "class" in ql or "def " in ql:
-                    lang = file_types[0] if file_types else "go"
-                    query_results = self.search_engine.search_with_reasoning(
-                        query=query, reason=thinking[:200], strategy="ast-grep",
-                        file_types=[lang], max_results=10,
-                    )
-                else:
-                    query_results = self.search_engine.search_with_reasoning(
-                        query=query, reason=thinking[:200], strategy="auto",
-                        file_types=file_types, max_results=10,
-                    )
-                results.extend(query_results)
-
-        # Deduplicate by path
-        seen = set()
-        deduped = []
-        for r in results:
-            if r.path not in seen:
-                seen.add(r.path)
-                deduped.append(r)
-
-        return deduped[:self.max_files]
-    
-    def _update_retrieval_reasons(
-        self,
-        files: List[ResearchFile],
-        queries: List[str],
-        thinking: str,
-    ) -> None:
-        """Update retrieval reasons based on what was actually found."""
+    def _build_files_summary(self, message_text: str, files: List[ResearchFile]) -> str:
+        """Build a summary of files for the evaluator via LLM: path + concise descriptive summary per file. No truncation."""
+        if not files:
+            return "(No files yet.)"
+        about_olake = (ABOUT_OLAKE or "").strip()
+        about_olake_repo_info = (ABOUT_OLAKE_REPO_INFO or "").strip()
+        system_prompt = _SUMMARIZE_FILES_SYSTEM.format(
+            about_olake=about_olake,
+            about_olake_repo_info=about_olake_repo_info,
+        )
+        # Process all files: batch only by context size so we never drop files (order may put important ones later)
+        batches: List[List[ResearchFile]] = []
+        current_batch: List[ResearchFile] = []
+        current_chars = 0
         for f in files:
-            if not f.retrieval_reason or f.retrieval_reason == f"Matched query:":
-                # Generate a better reason based on thinking + queries
-                matched_queries = [q for q in queries if q.lower() in f.content.lower() or q.lower() in f.path.lower()]
-                if matched_queries:
-                    f.retrieval_reason = f"Found while searching for: {', '.join(matched_queries[:2])}"
-                else:
-                    f.retrieval_reason = thinking[:150]
-    
-    def _build_files_summary(self, files: List[ResearchFile], max_per_file: int = 400) -> str:
-        """Build a summary of files for the evaluator: path, reason, and content snippet."""
+            file_chars = len((f.content or "").strip())
+            if current_batch and current_chars + file_chars > _SUMMARIZE_MAX_CHARS:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            current_batch.append(f)
+            current_chars += file_chars
+        if current_batch:
+            batches.append(current_batch)
+        all_summaries: List[Dict[str, Any]] = []
+        for batch in batches:
+            user_parts = [f"USER QUESTION: {message_text}", ""]
+            for f in batch:
+                pattern = getattr(f, "search_pattern", None) or ""
+                user_parts.append(f"--- FILE: {f.path} ---")
+                user_parts.append(f"Pattern used for retrieval: {pattern}")
+                user_parts.append("")
+                user_parts.append((f.content or "").strip())
+                user_parts.append("")
+            user_message = "\n".join(user_parts)
+            try:
+                response = asyncio.run(
+                    get_chat_completion(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message},
+                        ],
+                        temperature=0.2,
+                    )
+                )
+                parsed = _parse_summarizer_json(response)
+                all_summaries.extend(parsed)
+            except Exception as e:
+                log.warning(f"[DeepResearcher] Summarizer LLM failed: {e}")
+                for f in batch:
+                    pattern = getattr(f, "search_pattern", None) or ""
+                    all_summaries.append({"file_path": f.path, "summary": f"(Pattern: {pattern}). Summarization failed."})
+        if not all_summaries:
+            for f in files:
+                pattern = getattr(f, "search_pattern", None) or ""
+                all_summaries.append({"file_path": f.path, "summary": f"Pattern used: {pattern}"})
         lines = []
-        for i, f in enumerate(files[:15], 1):
-            snippet = (f.content or "").strip()[:max_per_file].replace("\n", " ")
-            lines.append(f"{i}. {f.path}\n   Why: {f.retrieval_reason}\n   Snippet: {snippet}...")
+        for i, item in enumerate(all_summaries, 1):
+            path = item.get("file_path", "")
+            summary = (item.get("summary", "") or "").strip()
+            lines.append(f"{i}. {path}\n   {summary}")
         return "\n\n".join(lines) if lines else "(No files yet.)"
 
     def _evaluate_context(
         self,
         message_text: str,
         files: List[ResearchFile],
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """
-        Ask LLM whether we have enough context. Returns (decision, reason).
-        decision is CONTINUE or DONE.
+        Ask LLM whether we have enough context. Returns (decision, reason, files_summary).
+        files_summary is the LLM-generated summary of files (for passing to the planner on the next iteration).
         """
         if not files:
-            return "CONTINUE", "No files yet; need to search."
-        summary = self._build_files_summary(files)
+            return "CONTINUE", "No files yet; need to search.", "(No files yet.)"
+        summary = self._build_files_summary(message_text, files)
         prompt = _EVALUATE_PROMPT.format(
             message_text=message_text,
             files_summary=summary,
@@ -371,13 +449,14 @@ Analyze the question and the search history. Decide what to search next (or outp
                 temperature=0.2,
             ))
             parsed = _parse_json(response)
+            print("Evaluate context response:", response)
             raw = (parsed.get("decision") or "CONTINUE").upper()
             decision = "DONE" if raw == "DONE" else "CONTINUE"
             reason = parsed.get("reason", "") or "Evaluation complete."
-            return decision, reason
+            return decision, reason, summary
         except Exception as e:
             log.warning(f"Evaluate step failed: {e}, defaulting to CONTINUE")
-            return "CONTINUE", "Evaluation failed; continuing to be safe."
+            return "CONTINUE", "Evaluation failed; continuing to be safe.", summary
 
     def _calculate_confidence(self, files: List[ResearchFile], iteration: int) -> float:
         """Calculate confidence score based on gathered files."""
@@ -409,8 +488,6 @@ Analyze the question and the search history. Decide what to search next (or outp
     def __call__(self, state: ConversationState) -> ConversationState:
         """Main entry point for the deep researcher node."""
         logger = get_logger()
-        user_id = state["user_id"]
-        channel_id = state["channel_id"]
         message_text = state["message_text"]
 
         iteration = state.get("research_iterations", 0)
@@ -443,26 +520,28 @@ Analyze the question and the search history. Decide what to search next (or outp
 
         try:
             while iteration < self.max_iterations:
+                print("Current iteration: ", iteration)
                 # Build prompt for LLM
                 user_prompt = self._build_user_prompt(state)
 
                 _emit({"type": "thinking_start", "iteration": iteration + 1})
+                about_olake = (state.get("about_olake_summary") or ABOUT_OLAKE).strip()
+                relevant = state.get("relevant_repos") or []
+                if isinstance(relevant, list) and relevant:
+                    repo_hint = "For this question, prefer searching these repos first: " + ", ".join(relevant) + ".\n\n"
+                    repo_info_for_prompt = repo_hint + (ABOUT_OLAKE_REPO_INFO or "").strip()
+                else:
+                    repo_info_for_prompt = (ABOUT_OLAKE_REPO_INFO or "").strip()
+                system_prompt = _system_prompt(about_olake, repo_info_for_prompt)
 
-                # Get LLM response (streamed when callback present; chunks emitted as thinking_chunk)
-                async def _streamed_planning():
-                    chunks = []
-                    async for delta in stream_chat_completion(
-                        messages=[
-                            {"role": "system", "content": _SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0.3,
-                    ):
-                        chunks.append(delta)
-                        _emit({"type": "thinking_chunk", "iteration": iteration + 1, "delta": delta})
-                    return "".join(chunks)
-
-                response = asyncio.run(_streamed_planning())
+                # Get LLM response (single non-streaming call)
+                response = asyncio.run(get_chat_completion(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                ))
 
                 # Parse response: search_intent, thinking, patterns, optional problem_summary, is_conceptual
                 result = _parse_json(response)
@@ -478,17 +557,9 @@ Analyze the question and the search history. Decide what to search next (or outp
                 if "is_conceptual" in result:
                     state["is_conceptual"] = bool(result.get("is_conceptual", False))
 
-                ripgrep_patterns = result.get("ripgrep_patterns", []) or []
-                ast_grep_patterns = result.get("ast_grep_patterns", []) or []
-                if isinstance(ripgrep_patterns, str):
-                    ripgrep_patterns = [ripgrep_patterns]
-                if isinstance(ast_grep_patterns, str):
-                    ast_grep_patterns = [ast_grep_patterns]
-                fallback_queries = result.get("search_queries", []) or []
-                if isinstance(fallback_queries, str):
-                    fallback_queries = [fallback_queries]
-                fallback_strategy = result.get("search_strategy", "auto")
-                file_types = result.get("file_types")
+                search_params_list = result.get("search_params", []) or []
+                if not isinstance(search_params_list, list):
+                    search_params_list = [search_params_list] if search_params_list else []
 
                 # Conceptual: skip code search
                 if state.get("is_conceptual", False) and not all_files:
@@ -499,92 +570,85 @@ Analyze the question and the search history. Decide what to search next (or outp
                     state["doc_sufficient"] = True
                     break
 
-                # Force at least one search when we have no files yet (derive from message_text)
-                if not ripgrep_patterns and not ast_grep_patterns and not fallback_queries and len(all_files) == 0:
-                    words = [w for w in message_text.strip().split() if len(w) > 2][:5]
-                    ripgrep_patterns = words or ["config", "documentation"]
-                    log.info(f"[DeepResearcher] No patterns from LLM; forcing ripgrep from message: {ripgrep_patterns}")
+                default_repo = "olake"
+                if isinstance(state.get("relevant_repos"), list) and state["relevant_repos"]:
+                    default_repo = state["relevant_repos"][0]
 
-                # Log thinking and search intent (what we're searching and why — visible in logs and next iteration)
+                # Force at least one search when we have no files yet (derive from message_text)
+                if not search_params_list and len(all_files) == 0:
+                    filler = {"hi", "team", "is", "it", "to", "in", "the", "a", "an", "and", "or", "can", "how", "what", "possible", "please", "help", "thanks"}
+                    raw_words = [w.strip(".,?!") for w in message_text.strip().split() if w.strip()]
+                    words = [w for w in raw_words if len(w) > 2 and w.lower() not in filler][:5]
+                    go_terms = []
+                    for w in words:
+                        if w.endswith("s") and len(w) > 3 and w.isalpha():
+                            go_terms.append(w[0].upper() + w[1:-1])
+                    patterns = (words + go_terms)[:6] or ["config", "documentation"]
+                    search_params_list = [
+                        {"pattern": p, "repo": default_repo, "max_results": 50, "file_types": ["go"], "lang": "go"}
+                        for p in patterns
+                    ]
+                    log.info(f"[DeepResearcher] No search_params from LLM; forcing from message: {[p['pattern'] for p in search_params_list]}")
+
+                # Log thinking and search intent
                 thinking_entry = f"Iteration {iteration + 1}: {thinking}"
                 thinking_log.append(thinking_entry)
                 state["thinking_log"] = thinking_log
 
                 logger.logger.info(f"[DeepResearcher] {search_intent}")
-                logger.logger.info(f"[DeepResearcher] ripgrep={ripgrep_patterns}, ast_grep={ast_grep_patterns}, fallback={fallback_queries}")
+                logger.logger.info(f"[DeepResearcher] search_params count={len(search_params_list)}")
 
-                # CLI progress: commands ran (summary from patterns)
-                commands_display: List[str] = []
-                if ripgrep_patterns:
-                    commands_display.append("ripgrep: " + ", ".join(ripgrep_patterns[:5]))
-                if ast_grep_patterns:
-                    commands_display.append("ast-grep: " + ", ".join(ast_grep_patterns[:3]))
-                if fallback_queries and not (ripgrep_patterns or ast_grep_patterns):
-                    commands_display.append("fallback: " + ", ".join(fallback_queries[:4]))
-                if commands_display:
-                    _emit({"type": "commands_ran", "commands": commands_display})
+                # Run search for each SearchParams (max 5 per iteration)
+                params_to_run = search_params_list[:5]
+                if params_to_run:
+                    commands_display: List[str] = []
+                    new_files: List[ResearchFile] = []
+                    for sp_dict in params_to_run:
+                        if not sp_dict or not (sp_dict.get("pattern") or "").strip():
+                            continue
+                        try:
+                            params = _dict_to_search_params(sp_dict, default_repo)
+                            commands_display.append(f"{params.pattern} (repo={params.repo})")
+                            files = self.search_engine.search(params)
+                            print("Files found: ", len(files))
+                            new_files.extend(files)
+                        except Exception as e:
+                            log.warning(f"[DeepResearcher] search failed for {sp_dict.get('pattern', '')!r}: {e}")
+                    if commands_display:
+                        _emit({"type": "commands_ran", "commands": commands_display})
 
-                has_patterns = ripgrep_patterns or ast_grep_patterns or fallback_queries
-                if has_patterns:
-                    new_files = self._execute_searches(
-                        ripgrep_patterns=ripgrep_patterns or None,
-                        ast_grep_patterns=ast_grep_patterns or None,
-                        fallback_queries=fallback_queries if not (ripgrep_patterns or ast_grep_patterns) else None,
-                        fallback_strategy=fallback_strategy,
-                        file_types=file_types,
-                        thinking=thinking,
-                    )
-                    all_patterns = list(ripgrep_patterns) + list(ast_grep_patterns) + list(fallback_queries)
-                    self._update_retrieval_reasons(new_files, all_patterns, thinking)
-
-                    # Accumulate files (deduplicate)
+                    # Deduplicate by path and merge into all_files; track newly added for history/emit
                     existing_paths = {f.path for f in all_files}
+                    newly_added: List[ResearchFile] = []
                     for f in new_files:
                         if f.path not in existing_paths:
-                            all_files.append(f)
                             existing_paths.add(f.path)
-
-                    state["research_files"] = all_files[:self.max_files]
-
-                    # Append to search history so the next iteration knows what was searched and what was found
-                    patterns_str = ", ".join(all_patterns[:6]) if all_patterns else "(none)"
-                    found_str = ", ".join(f.path for f in new_files[:5]) if new_files else "none"
-                    if len(new_files) > 5:
-                        found_str += f" (+{len(new_files) - 5} more)"
+                            all_files.append(f)
+                            newly_added.append(f)
+                    state["research_files"] = all_files[:self.max_files] #TODO
+                    patterns_str = ", ".join(d.get("pattern", "") for d in params_to_run if d.get("pattern"))[:80]
+                    found_str = ", ".join(f.path for f in newly_added[:5]) if newly_added else "none"
+                    if len(newly_added) > 5:
+                        found_str += f" (+{len(newly_added) - 5} more)"
                     search_history.append(f"{search_intent} Searched: {patterns_str}. Found: {found_str}")
                     state["search_history"] = search_history
-
-                    # Persist retrieval batch
                     try:
                         db = get_database()
-                        query_json = json.dumps({"ripgrep": ripgrep_patterns, "ast_grep": ast_grep_patterns})
-                        results_json = json.dumps([
-                            {"path": f.path, "relevance_score": f.relevance_score, "source": f.source}
-                            for f in new_files
-                        ])
-                        avg_score = sum(f.relevance_score for f in new_files) / len(new_files) if new_files else 0.0
+                        query_json = json.dumps([{"pattern": d.get("pattern"), "repo": d.get("repo")} for d in params_to_run])
+                        results_json = json.dumps([{"path": f.path, "relevance_score": f.relevance_score, "source": f.source} for f in newly_added])
+                        avg_score = sum(f.relevance_score for f in newly_added) / len(newly_added) if newly_added else 0.0
                         db.save_documentation_lookup(query_json, results_json, relevance_score=avg_score)
                     except Exception as e:
                         log.warning(f"[DeepResearcher] Failed to persist retrieval: {e}")
-
-                    # retrieval_history for conversation persistence
                     history = list(state.get("retrieval_history", []))
-                    for p in all_patterns:
+                    for d in params_to_run:
+                        p = d.get("pattern")
                         if p and p not in history:
                             history.append(p)
                     state["retrieval_history"] = history
-
-                    if new_files:
-                        logger.logger.info(
-                            f"[DeepResearcher] Found {len(new_files)} new files: "
-                            f"{[f.path for f in new_files[:3]]}..."
-                        )
-                    _emit({
-                        "type": "files_found",
-                        "count": len(new_files),
-                        "paths": [f.path for f in new_files],
-                        "files": [{"path": f.path, "source": f.source, "relevance_score": f.relevance_score, "retrieval_reason": f.retrieval_reason} for f in new_files],
-                    })
+                    if newly_added:
+                        logger.logger.info(f"[DeepResearcher] Found {len(newly_added)} new files: {[f.path for f in newly_added[:3]]}...")
+                    _emit({"type": "files_found", "count": len(newly_added), "paths": [f.path for f in newly_added], "files": [{"path": f.path, "source": f.source, "relevance_score": f.relevance_score, "retrieval_reason": f.retrieval_reason} for f in newly_added]})
 
                 # Update iteration counter
                 iteration += 1
@@ -598,7 +662,9 @@ Analyze the question and the search history. Decide what to search next (or outp
                 decision = "CONTINUE"
                 eval_reason = ""
                 if all_files:
-                    decision, eval_reason = self._evaluate_context(message_text, all_files)
+                    decision, eval_reason, files_summary = self._evaluate_context(message_text, all_files)
+                    state["research_files_summary"] = files_summary
+                    state["eval_reason"] = eval_reason
                     logger.logger.info(f"[DeepResearcher] Evaluate: {decision} — {eval_reason}")
                     thinking_log.append(f"Evaluate: {decision}. {eval_reason}")
                     state["thinking_log"] = thinking_log
@@ -615,34 +681,30 @@ Analyze the question and the search history. Decide what to search next (or outp
                     state["research_done"] = True
                     break
             
-            # Build research context summary (search history + evaluation)
-            state["research_context"] = {
-                "total_iterations": iteration,
-                "total_files": len(all_files),
-                "final_confidence": state["research_confidence"],
-                "thinking_summary": "\n\n".join(thinking_log),
-                "search_history": search_history,
-                "eval_reason": eval_reason,
-            }
-            # Feed solution_provider: use research confidence (no vectordb)
+            # Feed downstream: research confidence (used for routing)
             state["final_confidence"] = state["research_confidence"]
             state["doc_sufficient"] = state["research_confidence"] >= Config.MIN_CONFIDENCE_TO_STOP
             
             # Log final summary
             logger.logger.info(
                 f"[DeepResearcher] Completed after {iteration} iterations. "
-                f"Found {len(all_files)} files. Confidence: {state['research_confidence']:.2f}"
+                f"Found {len(all_files)} files. research_confidence={state['research_confidence']:.2f}"
             )
             
         except Exception as e:
+            tb = traceback.format_exc()
             logger.log_error(
                 error_type="DeepResearchError",
                 error_message=str(e),
-                user_id=user_id,
-                channel_id=channel_id,
+                stack_trace=tb,
             )
+            logger.logger.exception("[DeepResearcher] Error (full traceback above)")
+            print(f"[DeepResearcher] ERROR: {e}", file=sys.stderr)
+            print(tb, file=sys.stderr)
             state["research_done"] = True
-            state["research_context"] = {"error": str(e)}
+            state["research_confidence"] = 0.8
+            state["research_error"] = True
+            state["response_text"] = ""
         
         return state
 

@@ -29,6 +29,7 @@ from typing import Optional, List, Dict, Any
 # Rich for live progress (thinking / search_intent / commands / files)
 from rich.console import Console, Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 from rich.tree import Tree
@@ -99,9 +100,9 @@ def success(text):
     print(f"{GREEN}  ✓  {text}{RESET}")
 
 
-# ── pretty research files printer (ripgrep/ast-grep codebase search) ─────────
+# ── pretty research files printer (codebase search: ripgrep + ast-grep via SearchParams) ─
 def print_research_files(files: List[Any], iteration: int = None):
-    """Pretty print research files from codebase search (ripgrep/ast-grep)."""
+    """Pretty print research files from codebase search (unified search with SearchParams)."""
     if not files:
         print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
         print(f"{BOX_V} {BOLD}{MAGENTA}📁 FILES RETRIEVED{RESET}".ljust(58) + f"{BOX_V}")
@@ -137,7 +138,7 @@ def print_research_files(files: List[Any], iteration: int = None):
 
 
 # ── pretty decision printer ───────────────────────────────────────────────
-def print_decision(intent: str, urgency: str, confidence: float, 
+def print_decision(intent: str, confidence: float,
                    should_escalate: bool = False, escalation_reason: str = None):
     """Pretty print agent decision."""
     conf_color = GREEN if confidence >= 0.7 else YELLOW if confidence >= 0.4 else RED
@@ -146,7 +147,6 @@ def print_decision(intent: str, urgency: str, confidence: float,
     print(f"{BOX_V} {BOLD}{CYAN}🧠 AGENT DECISION{RESET}".ljust(58) + f"{BOX_V}")
     print(f"{BOX_V}{BOX_H*56}{BOX_V}")
     print(f"{BOX_V}  Intent:    {BOLD}{intent}{RESET}".ljust(58) + f"{BOX_V}")
-    print(f"{BOX_V}  Urgency:   {BOLD}{urgency}{RESET}".ljust(58) + f"{BOX_V}")
     print(f"{BOX_V}  Confidence: {conf_color}{confidence:.0%}{RESET}".ljust(58) + f"{BOX_V}")
     
     if should_escalate:
@@ -157,6 +157,51 @@ def print_decision(intent: str, urgency: str, confidence: float,
                 print(f"{BOX_V}    {line}".ljust(58) + f"{BOX_V}")
     
     print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
+
+
+# ── pretty agent steps printer (which node ran + result) ───────────────────
+def print_agent_steps(steps: List[Dict[str, Any]]) -> None:
+    """Pretty print each graph step: node name and result summary."""
+    if not steps:
+        return
+    section_header("AGENT STEPS (node → result)")
+    for s in steps:
+        if s.get("phase") != "end":
+            continue
+        node = s.get("node", "?")
+        data = s.get("data") or {}
+        err = data.get("error")
+        if err:
+            print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
+            print(f"{BOX_V} {BOLD}{RED}✗ {node}{RESET}".ljust(58) + f"{BOX_V}")
+            print(f"{BOX_V}  {RED}Error: {err[:48]}{RESET}".ljust(58) + f"{BOX_V}")
+            print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
+            continue
+        parts = []
+        for k, v in data.items():
+            if v is None:
+                parts.append(f"  {k}=None")
+            elif isinstance(v, bool):
+                parts.append(f"  {k}={str(v).lower()}")
+            elif isinstance(v, (int, float)):
+                if isinstance(v, float) and 0 <= v <= 1:
+                    parts.append(f"  {k}={v:.2f}")
+                else:
+                    parts.append(f"  {k}={v}")
+            elif isinstance(v, list):
+                parts.append(f"  {k}=[{len(v)} items]")
+            elif isinstance(v, str) and len(v) > 40:
+                parts.append(f"  {k}={v[:40]}…")
+            else:
+                parts.append(f"  {k}={v}")
+        body = "\n".join(parts) if parts else "  (no summary)"
+        print(f"\n{BOX_TL}{BOX_H*58}{BOX_TR}")
+        print(f"{BOX_V} {BOLD}{GREEN}✓ {node}{RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_V}{BOX_H*56}{BOX_V}")
+        for line in body.split("\n"):
+            print(f"{BOX_V}{DIM}{line}{RESET}".ljust(58) + f"{BOX_V}")
+        print(f"{BOX_BL}{BOX_H*58}{BOX_BR}")
+    footer()
 
 
 # ── pretty final result printer ───────────────────────────────────────────
@@ -223,8 +268,6 @@ SCENARIOS = {
 # ── build a fake Slack event ───────────────────────────────────────────────
 def make_event(
     text: str,
-    user_id: str,
-    channel_id: str,
     thread_ts: str,
     message_ts: Optional[str] = None,
 ) -> dict:
@@ -236,73 +279,144 @@ def make_event(
             "type": "message",
             "subtype": None,
             "text": text,
-            "user": user_id,
-            "channel": channel_id,
             "ts": ts,
             "thread_ts": thread_ts,
         },
     }
 
-def _build_progress_display(events: List[Dict], still_running: bool):
-    """Build Rich renderable for live progress (streamed thinking, search_intent, commands, files)."""
-    parts = []
+# Frames for manual loading indicator (so it advances on each refresh; Rich Spinner resets when recreated)
+_LOADING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def _build_progress_display(events: List[Dict], still_running: bool, refresh_index: int = 0):
+    """
+    Build Rich renderable for live progress: per-iteration blocks with
+    search intent (what it's searching and why), thinking, commands (pattern + repo from SearchParams),
+    and files. Matches production deep_researcher emissions exactly.
+    """
+    # Streamed thinking chunks by iteration (for in-progress)
     streamed_by_iter: Dict[int, str] = {}
     for ev in events:
         if ev.get("type") == "thinking_chunk":
             it = ev.get("iteration", 0)
             streamed_by_iter[it] = streamed_by_iter.get(it, "") + (ev.get("delta") or "")
 
-    started_iters = [ev["iteration"] for ev in events if ev.get("type") == "thinking_start"]
-    done_iters = {ev["iteration"] for ev in events if ev.get("type") == "thinking_done"}
-    current_iter = next((it for it in reversed(started_iters) if it not in done_iters), None)
-    if still_running and current_iter is not None:
-        parts.append(Group(Spinner("dots"), Text("  Thinking…", style="cyan")))
+    # Group events into per-iteration blocks: [{"iter": N, "search_intent": str, "thinking": str, "preview": str, "commands": list, "files": list}]
+    blocks: List[Dict[str, Any]] = []
+    current_block: Optional[Dict[str, Any]] = None
 
-    tree = Tree("[bold]Research progress[/bold]", expanded=True)
     for ev in events:
         t = ev.get("type")
         if t == "thinking_done":
             it = ev.get("iteration", 0)
-            preview = ev.get("preview", "")
-            full = ev.get("thinking", "")
-            branch = tree.add(
-                f"[dim]▸[/dim] [magenta]Thinking (iteration {it}):[/magenta] {preview}",
-                expanded=False,
-            )
-            branch.add(Text(full, style="dim"))
-        elif t == "search_intent":
-            text = ev.get("text", "")
-            tree.add(f"[dim]▸[/dim] [blue]Search intent:[/blue] {text}")
-        elif t == "commands_ran":
-            cmds = ev.get("commands", [])
-            branch = tree.add("[dim]▸[/dim] [yellow]Commands ran:[/yellow]", expanded=False)
-            for c in cmds:
-                branch.add(Text(c, style="dim"))
-        elif t == "files_found":
-            count = ev.get("count", 0)
-            paths = ev.get("paths", [])
-            summary = ", ".join(paths[:3])
-            if len(paths) > 3:
-                summary += f" (+{len(paths) - 3} more)"
-            if not summary:
-                summary = "(none)"
-            branch = tree.add(
-                f"[dim]▸[/dim] [green]Files found ({count}):[/green] {summary}",
-                expanded=False,
-            )
-            for p in paths[:15]:
-                branch.add(Text(p, style="dim"))
-            if len(paths) > 15:
-                branch.add(Text(f"... and {len(paths) - 15} more", style="dim"))
+            current_block = {
+                "iter": it,
+                "search_intent": "",
+                "thinking": ev.get("thinking", ""),
+                "preview": ev.get("preview", ""),
+                "commands": [],
+                "paths": [],
+            }
+            blocks.append(current_block)
+        elif t == "search_intent" and current_block is not None:
+            current_block["search_intent"] = ev.get("text", "")
+        elif t == "commands_ran" and current_block is not None:
+            current_block["commands"] = ev.get("commands", [])
+        elif t == "files_found" and current_block is not None:
+            current_block["paths"] = ev.get("paths", [])
 
-    if current_iter is not None:
-        streamed = streamed_by_iter.get(current_iter, "")
-        preview = (streamed[:80] + "…") if len(streamed) > 80 else (streamed or "…")
-        branch = tree.add(
-            f"[dim]▸[/dim] [magenta]Thinking (iteration {current_iter}):[/magenta] {preview}",
-            expanded=False,
+    started_iters = [ev["iteration"] for ev in events if ev.get("type") == "thinking_start"]
+    done_iters = {ev["iteration"] for ev in events if ev.get("type") == "thinking_done"}
+    current_iter = next((it for it in reversed(started_iters) if it not in done_iters), None)
+
+    parts: List[Any] = []
+
+    # Modern loading state until first iteration output is available (manual frames so it animates each refresh)
+    if still_running and not blocks:
+        frame = _LOADING_FRAMES[refresh_index % len(_LOADING_FRAMES)]
+        return Panel(
+            Text(f"{frame}  Researching....", style="cyan"),
+            title="[bold]Research[/bold]",
+            border_style="dim",
+            padding=(1, 2),
         )
-        branch.add(Text(streamed or "Waiting for model…", style="dim"))
+
+    # Status line when research is in progress (we have at least started)
+    if still_running and current_iter is not None:
+        streamed = streamed_by_iter.get(current_iter, "")
+        if streamed.strip():
+            preview = (streamed[:60] + "…") if len(streamed) > 60 else streamed
+            parts.append(Group(
+                Spinner("dots"),
+                Text(f"  [cyan]Iteration {current_iter}[/cyan] — ", style="bold"),
+                Text(preview, style="dim"),
+            ))
+        else:
+            parts.append(Group(
+                Spinner("dots"),
+                Text(f"  [cyan]Iteration {current_iter}[/cyan] — waiting for model…", style="dim"),
+            ))
+
+    # Root tree: one section per iteration
+    tree = Tree(
+        "[bold cyan]Research progress[/bold cyan]",
+        expanded=True,
+        guide_style="dim",
+    )
+
+    # Completed iteration blocks
+    for blk in blocks:
+        it = blk.get("iter", 0)
+        search_intent = (blk.get("search_intent") or "").strip() or "(no intent captured)"
+        preview = (blk.get("preview") or "").strip() or "(no preview)"
+        thinking = (blk.get("thinking") or "").strip()
+        commands = blk.get("commands") or []
+        paths = blk.get("paths") or []
+
+        iter_label = f"[bold]Iteration {it}[/bold]"
+        if search_intent and search_intent != "(no intent captured)":
+            short = search_intent[:70] + "…" if len(search_intent) > 70 else search_intent
+            iter_label += f" — [blue]{short}[/blue]"
+        iter_branch = tree.add(iter_label, expanded=True)
+
+        # What I'm searching and why
+        iter_branch.add(Text("What I'm searching and why:", style="bold"))
+        iter_branch.add(Text(search_intent, style="dim"))
+
+        # Thinking (collapsible: preview in label, full text in child)
+        think_label = f"Thinking: {preview}"
+        think_branch = iter_branch.add(think_label, expanded=False)
+        think_branch.add(Text(thinking or "(no thinking)", style="dim"))
+
+        # Commands ran (each = one SearchParams: "pattern (repo=X)")
+        if commands:
+            cmd_branch = iter_branch.add("Commands ran:", expanded=False)
+            for c in commands:
+                cmd_branch.add(Text(c, style="dim"))
+
+        # Files found (collapsible)
+        count = len(paths)
+        if count > 0:
+            summary = ", ".join(paths[:3])
+            if count > 3:
+                summary += f" (+{count - 3} more)"
+            files_branch = iter_branch.add(f"Files found ({count}): {summary}", expanded=False)
+            for p in paths[:25]:
+                files_branch.add(Text(p, style="dim"))
+            if count > 25:
+                files_branch.add(Text(f"... and {count - 25} more", style="dim"))
+        else:
+            iter_branch.add(Text("Files found: (none)", style="dim"))
+
+    # In-progress iteration (streaming thinking)
+    if current_iter is not None and current_iter not in {b["iter"] for b in blocks}:
+        streamed = streamed_by_iter.get(current_iter, "")
+        preview = (streamed[:60] + "…") if len(streamed) > 60 else (streamed or "Waiting for model…")
+        prog_branch = tree.add(
+            f"[bold]Iteration {current_iter}[/bold] [dim](in progress)[/dim] — {preview}",
+            expanded=True,
+        )
+        prog_branch.add(Text(streamed or "…", style="dim"))
 
     if parts:
         parts.append(tree)
@@ -321,9 +435,6 @@ def _patch_slack_for_local_testing():
         class _FakeSlackClient:
             """Mirrors the SlackClient interface. All API calls are no-ops or print."""
 
-            def __init__(self):
-                self.bot_user_id = "U_BOT_TEST"
-
             def send_message(self, channel, text, thread_ts=None, blocks=None):
                 print(f"\n{DIM}  [SLACK → #{channel}]{RESET}")
                 print(f"  {text}")
@@ -337,9 +448,8 @@ def _patch_slack_for_local_testing():
             def remove_reaction(self, channel, timestamp, emoji):
                 pass
 
-            def get_user_info(self, user_id):
+            def get_user_info(self):
                 return {
-                    "id": user_id,
                     "name": "local_test_user",
                     "real_name": "Local Test User",
                     "profile": {"email": "test@example.com"},
@@ -347,9 +457,6 @@ def _patch_slack_for_local_testing():
 
             def get_thread_messages(self, channel, thread_ts, limit=10):
                 return []
-
-            def is_bot_message(self, event):
-                return event.get("user") == self.bot_user_id
 
             def format_response_blocks(self, response_text, confidence,
                                        docs_cited=None, is_clarification=False,
@@ -369,12 +476,6 @@ def _patch_slack_for_local_testing():
         import agent.nodes.solution_provider as sp
         if hasattr(sp, "slack_client"):
             sp.slack_client = fake
-        import agent.nodes.escalation_handler as eh
-        if hasattr(eh, "slack_client"):
-            eh.slack_client = fake
-        import agent.nodes.clarification_asker as ca
-        if hasattr(ca, "slack_client"):
-            ca.slack_client = fake
 
         info("Slack client patched for local testing ✓")
     except Exception as e:
@@ -384,14 +485,12 @@ def _patch_slack_for_local_testing():
 # ── run a single message through the agent graph ──────────────────────────
 def run_message(
     text: str,
-    user_id: str,
-    channel_id: str,
     thread_ts: str,
     graph,
 ) -> dict:
     from agent.state import create_initial_state
 
-    event = make_event(text, user_id, channel_id, thread_ts)
+    event = make_event(text, thread_ts)
     state = create_initial_state(event)
 
     # Live progress (thinking / search_intent / commands / files) during deep_researcher
@@ -402,7 +501,13 @@ def run_message(
         with progress_lock:
             progress_events.append(ev)
 
+    step_events: List[Dict[str, Any]] = []
+
+    def on_step(phase: str, node_name: str, data: Any) -> None:
+        step_events.append({"phase": phase, "node": node_name, "data": data})
+
     state["_cli_progress_callback"] = on_progress
+    state["_step_log_callback"] = on_step
 
     result_holder: List[Optional[dict]] = [None]
     exc_holder: List[Optional[Exception]] = [None]
@@ -417,16 +522,21 @@ def run_message(
     graph_thread = threading.Thread(target=run_graph)
     graph_thread.start()
 
+    refresh_count: List[int] = [0]
+
     def make_display():
         with progress_lock:
             events_snapshot = list(progress_events)
-        return _build_progress_display(events_snapshot, graph_thread.is_alive())
+        refresh_count[0] += 1
+        return _build_progress_display(
+            events_snapshot, graph_thread.is_alive(), refresh_count[0]
+        )
 
     console = Console()
-    with Live(make_display(), refresh_per_second=4, console=console) as live:
+    with Live(make_display(), refresh_per_second=8, console=console) as live:
         while graph_thread.is_alive():
             live.update(make_display())
-            time.sleep(0.25)
+            time.sleep(0.125)
         live.update(make_display())
     graph_thread.join()
 
@@ -436,20 +546,22 @@ def run_message(
         raise exc_holder[0]
 
     result = result_holder[0]
-    return {"state": result, "elapsed": elapsed}
+    return {"state": result, "elapsed": elapsed, "steps": step_events}
 
 
 def print_result(result: dict, iteration: int = None):
     """Print result with pretty formatting."""
     state = result["state"]
     elapsed = result["elapsed"]
-    
+    steps = result.get("steps", [])
+
+    # Which agents ran and their results (pretty-printed)
+    print_agent_steps(steps)
+
     # Intent and decision
     intent = state.get("intent_type")
-    urgency = state.get("urgency")
     confidence = state.get("final_confidence", 0.0)
     intent_str = intent.value if intent else "?"
-    urgency_str = urgency.value if urgency else "?"
     
     # Escalation
     should_escalate = state.get("should_escalate", False)
@@ -458,7 +570,6 @@ def print_result(result: dict, iteration: int = None):
     # Print decision
     print_decision(
         intent=intent_str,
-        urgency=urgency_str,
         confidence=confidence,
         should_escalate=should_escalate,
         escalation_reason=escalation_reason
@@ -472,7 +583,7 @@ def print_result(result: dict, iteration: int = None):
             print(f"  {i}. {entry}")
         footer()
 
-    # Research files (ripgrep/ast-grep codebase search; no vectordb)
+    # Research files (codebase search via SearchParams → ripgrep + ast-grep; no vectordb)
     research_files = state.get("research_files", [])
     print_research_files(research_files, iteration=iteration)
 
@@ -517,8 +628,8 @@ def main():
 
     try:
         # Production graph only — same as main.py so local tests reflect prod behavior
-        from agent.graph import create_agent_graph
-        graph = create_agent_graph()
+        from agent.graph import get_agent_graph
+        graph = get_agent_graph()
         success("Graph loaded ✓")
     except Exception as e:
         error(f"Failed to load graph: {e}")
@@ -535,7 +646,7 @@ def main():
             header(f"Scenario: {args.scenario} ({len(messages)} message(s))")
             for i, msg in enumerate(messages, 1):
                 user_msg(msg)
-                result = run_message(msg, args.user, args.channel, thread_ts, graph)
+                result = run_message(msg, thread_ts, graph)
                 print_result(result, iteration=i)
             separator()
             success("Scenario complete!")
@@ -544,7 +655,7 @@ def main():
         # ── single message mode ────────────────────────────────────────────────
         if args.message:
             user_msg(args.message)
-            result = run_message(args.message, args.user, args.channel, thread_ts, graph)
+            result = run_message(args.message, thread_ts, graph)
             print_result(result)
             return
 
@@ -570,7 +681,7 @@ def main():
                 continue
 
             user_msg(raw)
-            result = run_message(raw, args.user, args.channel, thread_ts, graph)
+            result = run_message(raw, thread_ts, graph)
             print_result(result, iteration=iteration)
             iteration += 1
 

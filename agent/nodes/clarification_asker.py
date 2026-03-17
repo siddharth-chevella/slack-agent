@@ -23,7 +23,7 @@ from agent.slack_client import create_slack_client
 from agent.persistence import get_database
 from agent.logger import get_logger, EventType
 from agent.llm import get_chat_completion
-from agent.config import OLAKE_CONTEXT
+from agent.config import ABOUT_OLAKE
 
 _PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
@@ -32,14 +32,16 @@ def _parse_json(text: str | None) -> list:
     if not text:
         raise ValueError("LLM returned empty")
     text = _PARSE_RE_FENCE.sub("", text.strip())
+
+    print("clarification_asker: text:", text)
     return json.loads(text)
 
 
 # System prompt for fallback question generation
-_SYSTEM_PROMPT = f"""You are Alex, a senior OLake support engineer.
+_SYSTEM_PROMPT_TEMPLATE = """You are Alex, a senior OLake support engineer.
 
 About OLake:
-{OLAKE_CONTEXT.strip()}
+{about_olake}
 
 Your job: generate 1-2 clarifying questions to send to a user who posted a support question.
 
@@ -57,6 +59,11 @@ Rules for questions:
 
 Return a JSON array of question strings. No preamble.
 Example: ["What PostgreSQL version are you running?", "Are you using CDC or full-refresh mode?"]"""
+
+
+def _clarification_system_prompt(state: ConversationState) -> str:
+    about = (state.get("about_olake_summary") or ABOUT_OLAKE).strip()
+    return _SYSTEM_PROMPT_TEMPLATE.format(about_olake=about)
 
 
 def _format_questions_as_slack(questions: List[str]) -> str:
@@ -105,11 +112,11 @@ async def clarification_asker(state: ConversationState) -> Dict[str, Any]:
 Problem summary: {problem_summary}
 Internal Agent Gaps: {gaps} (Do NOT ask the user to solve these gaps for you. Only ask for context about their setup.)
 
-Generate 1–2 clarifying questions about the USER'S specific setup or intent. Return JSON array only."""
+Generate 1-2 clarifying questions about the USER'S specific setup or intent. Return JSON array only."""
 
             response = await get_chat_completion(
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": _clarification_system_prompt(state)},
                     {"role": "user",   "content": prompt},
                 ],
                 temperature=0.3,
@@ -150,7 +157,6 @@ Generate 1–2 clarifying questions about the USER'S specific setup or intent. R
                 user_id=user_id,
                 message_text=message_text,
                 intent_type=str(state.get("intent_type", "")),
-                urgency=str(state.get("urgency", "")),
                 response_text=message_body,
                 confidence=state.get("final_confidence", 0.0),
                 needs_clarification=True,

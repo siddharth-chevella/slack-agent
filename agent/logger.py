@@ -31,6 +31,32 @@ class EventType(Enum):
     ESCALATION_TRIGGERED = "escalation_triggered"
     RESPONSE_SENT = "response_sent"
     ERROR_OCCURRED = "error_occurred"
+    NODE_STEP = "node_step"
+
+
+def _format_step_summary(summary: Dict[str, Any]) -> str:
+    """Format a step result summary for pretty logging (one line, key=value)."""
+    if not summary:
+        return "(no state change)"
+    parts = []
+    for k, v in summary.items():
+        if v is None:
+            parts.append(f"{k}=None")
+        elif isinstance(v, bool):
+            parts.append(f"{k}={str(v).lower()}")
+        elif isinstance(v, (int, float)):
+            if isinstance(v, float) and 0 <= v <= 1:
+                parts.append(f"{k}={v:.2f}")
+            else:
+                parts.append(f"{k}={v}")
+        elif isinstance(v, list):
+            parts.append(f"{k}=[{len(v)} items]")
+        elif isinstance(v, str):
+            preview = v[:50] + "…" if len(v) > 50 else v
+            parts.append(f"{k}={preview!r}")
+        else:
+            parts.append(f"{k}={v!r}")
+    return "  ".join(parts)
 
 
 class StructuredLogger:
@@ -262,6 +288,45 @@ class StructuredLogger:
         self.logger.error(
             f"ERROR: {error_type} - {error_message}",
             exc_info=stack_trace is not None
+        )
+
+    def log_step_start(self, node_name: str) -> None:
+        """Log that a graph node is about to run (pretty, easy to grep)."""
+        msg = f"STEP  →  {node_name}"
+        self.logger.info(msg)
+        self._write_jsonl(
+            self.events_log,
+            {
+                "timestamp": datetime.now().isoformat(),
+                "event_type": EventType.NODE_STEP.value,
+                "phase": "start",
+                "node": node_name,
+            },
+        )
+
+    def log_step_end(
+        self,
+        node_name: str,
+        summary: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Log that a graph node finished, with optional result summary (pretty print)."""
+        if error:
+            msg = f"STEP  ←  {node_name}  ERROR: {error}"
+        else:
+            summary_str = _format_step_summary(summary or {})
+            msg = f"STEP  ←  {node_name}  {summary_str}"
+        self.logger.info(msg)
+        self._write_jsonl(
+            self.events_log,
+            {
+                "timestamp": datetime.now().isoformat(),
+                "event_type": EventType.NODE_STEP.value,
+                "phase": "end",
+                "node": node_name,
+                "summary": summary or {},
+                "error": error,
+            },
         )
 
 
