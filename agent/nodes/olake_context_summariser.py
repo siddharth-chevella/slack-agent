@@ -8,36 +8,12 @@ else unchanged. No additions, no alterations, no assumptions — strict extract/
 
 from __future__ import annotations
 import asyncio
-import json
-import re
 from typing import Any, Dict, List
 
 from agent.state import ConversationState
 from agent.llm import get_chat_completion
 from agent.config import ABOUT_OLAKE, ABOUT_OLAKE_REPO_INFO
-
-
-_JSON_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.DOTALL)
-
-
-def _parse_json(text: str | None) -> dict:
-    if not text:
-        raise ValueError("LLM returned empty response")
-    text = text.strip()
-    text = _JSON_FENCE.sub("", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Truncation repair
-    if not text.rstrip().endswith("}"):
-        text = text.rstrip()
-        if text.count('"') % 2 != 0:
-            text += '"'
-        text += "}"
-    
-    print("olake_context_summariser:", text)
-    return json.loads(text)
+from agent.utils.parser import parse_simple_json_with_truncation as _parse_json
 
 
 def _conversation_summary(thread_context: List[Dict[str, Any]], max_messages: int = 10) -> str:
@@ -100,7 +76,7 @@ def summarise_olake_context(state: ConversationState) -> ConversationState:
     Run the OLake context summariser: produce a focused excerpt of ABOUT_OLAKE
     and set state["about_olake_summary"].
     """
-    user_question = (state.get("message_text") or "").strip()
+    user_question = (state.get("user_query") or "").strip()
     if not user_question:
         state["about_olake_summary"] = ABOUT_OLAKE.strip()
         return state

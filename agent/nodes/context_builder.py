@@ -97,7 +97,7 @@ def build_context(state: ConversationState) -> ConversationState:
                         {
                             "message_ts": ts,
                             "user_id": slack_msg.get("user", ""),
-                            "message_text": slack_msg.get("text", ""),
+                            "user_query": slack_msg.get("text", ""),
                             "created_at": ts,
                         }
                     )
@@ -109,7 +109,7 @@ def build_context(state: ConversationState) -> ConversationState:
                 thread_context.append({
                     "message_ts": message_ts,
                     "user_id": user_id,
-                    "message_text": state.get("message_text", ""),
+                    "user_query": state.get("user_query", ""),
                     "created_at": message_ts,
                 })
 
@@ -135,18 +135,6 @@ def build_context(state: ConversationState) -> ConversationState:
 
         state["thread_context"] = thread_context
         state["org_member_replied"] = org_member_replied
-
-        # #region debug log
-        try:
-            import json
-            _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
-            _first = thread_context[0] if thread_context else {}
-            _keys = list(_first.keys()) if _first else []
-            with open(_log_path, "a") as _f:
-                _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H1", "location": "context_builder.py:after_set_thread_context", "message": "thread_context set", "data": {"thread_ts": thread_ts, "thread_context_count": len(thread_context), "first_msg_keys": _keys}, "timestamp": __import__("time").time() * 1000}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         # ----------------------------------------------------------------
         # Logging
@@ -183,14 +171,5 @@ def build_context(state: ConversationState) -> ConversationState:
         state["previous_messages"] = []
         state["thread_context"] = []
         state["org_member_replied"] = False
-        # #region debug log
-        try:
-            import json
-            _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
-            with open(_log_path, "a") as _f:
-                _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H2", "location": "context_builder.py:except_fallback", "message": "context_builder exception fallback", "data": {"error": str(e)}, "timestamp": __import__("time").time() * 1000}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
     return state

@@ -68,8 +68,6 @@ class SearchResult:
     line_number: int
     content: str
     match_text: str
-    source: str  # "ripgrep" | "ast-grep"
-    language: str = ""
 
 
 class CodebaseSearchEngine:
@@ -170,8 +168,6 @@ class CodebaseSearchEngine:
                                 line_number=line_num,
                                 content=content,
                                 match_text=match_text,
-                                source="ripgrep",
-                                language=self._detect_language(file_path),
                             ))
                         elif data["type"] == "context":
                             # Context lines - append to previous result if same file
@@ -238,8 +234,6 @@ class CodebaseSearchEngine:
                             line_number=line_num + 1,  # Convert to 1-based
                             content=content,
                             match_text=match_text,
-                            source="ast-grep",
-                            language=lang,
                         ))
             except json.JSONDecodeError as e:
                 log.error(f"Failed to parse ast-grep output: {e}")
@@ -353,8 +347,6 @@ class CodebaseSearchEngine:
             except Exception:
                 content = "\n".join(m.content for m in matches)
             
-            # Calculate relevance score based on number of matches
-            relevance = min(1.0, len(matches) * 0.2 + 0.3)
             # Prefix path with repo name so callers see e.g. "olake/pkg/foo.go"
             display_path = f"{repo}/{file_path}" if repo else file_path
             
@@ -362,9 +354,6 @@ class CodebaseSearchEngine:
                 path=display_path,
                 content=content,
                 matches=[m.match_text for m in matches[:10]],  # Top 10 matches
-                relevance_score=relevance,
-                source=matches[0].source,
-                language=matches[0].language,
                 retrieval_reason=f"Matched query: {query}",
                 search_pattern=query,
             ))
@@ -459,7 +448,7 @@ class CodebaseSearchEngine:
         # Deduplicate by file path
         seen_paths = set()
         deduped = []
-        for r in sorted(all_results, key=lambda x: x.relevance_score, reverse=True):
+        for r in sorted(all_results, key=lambda x: len(x.matches), reverse=True):
             if r.path not in seen_paths:
                 seen_paths.add(r.path)
                 deduped.append(r)

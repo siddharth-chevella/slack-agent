@@ -24,7 +24,7 @@ def escalation_handler(state: ConversationState) -> ConversationState:
     channel_id = state["channel_id"]
     user_id = state["user_id"]
     thread_ts = state.get("thread_ts") or state["message_ts"]
-    message_text = state["message_text"]
+    user_query = state["user_query"]
 
     try:
         slack_client = create_slack_client()
@@ -49,7 +49,7 @@ def escalation_handler(state: ConversationState) -> ConversationState:
             "Choose the best person to help. Reply with only that person's slack_name, nothing else.\n\n"
             "Team:\n" + team_list
         )
-        query = f"User question: {message_text or '(no message)'}"
+        query = f"User question: {user_query or '(no message)'}"
 
         try:
             reply = get_chat_completion_sync(
@@ -104,7 +104,7 @@ def escalation_handler(state: ConversationState) -> ConversationState:
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                message_text=message_text,
+                user_query=user_query,
                 intent_type=str(state.get("intent_type", "")),
                 response_text=state.get("response_text"),
                 confidence=state.get("research_confidence", 0.0),

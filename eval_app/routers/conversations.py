@@ -20,7 +20,7 @@ def list_conversations(
         "all",
         description="all | slack | local_test",
     ),
-    q: str | None = Query(None, description="Search in message_text and response_text"),
+    q: str | None = Query(None, description="Search in user_query and response_text"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):

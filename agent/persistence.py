@@ -86,7 +86,7 @@ class Database:
                     thread_ts TEXT,
                     channel_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
-                    message_text TEXT NOT NULL,
+                    user_query TEXT NOT NULL,
                     intent_type TEXT,
                     response_text TEXT,
                     confidence REAL DEFAULT 0.0,
@@ -156,7 +156,6 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     query TEXT NOT NULL,
                     results TEXT NOT NULL,
-                    relevance_score REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -209,15 +208,13 @@ class Database:
         self,
         query: str,
         results: str,
-        relevance_score: Optional[float] = None,
     ) -> int:
         """
         Persist a single retrieval batch (e.g. one round of queries and their results).
         
         Args:
             query: JSON array of queries run, or single query string
-            results: JSON array of result items (e.g. [{"path", "relevance_score", "source"}])
-            relevance_score: Optional aggregate relevance for this batch
+            results: JSON array of result items (e.g. [{"path", "source"}])
             
         Returns:
             ID of inserted row
@@ -225,9 +222,9 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO documentation_lookups (query, results, relevance_score)
+                INSERT INTO documentation_lookups (query, results)
                 VALUES (?, ?, ?)
-            """, (query, results, relevance_score))
+            """, (query, results))
             return cursor.lastrowid
     
     def save_conversation(self, record: ConversationRecord) -> int:
@@ -248,7 +245,7 @@ class Database:
             if has_urgency:
                 cursor.execute("""
                     INSERT INTO conversations (
-                        message_ts, thread_ts, channel_id, user_id, message_text,
+                        message_ts, thread_ts, channel_id, user_id, user_query,
                         intent_type, urgency, response_text, confidence,
                         needs_clarification, escalated, escalation_reason,
                         docs_cited, reasoning_summary, processing_time,
@@ -260,7 +257,7 @@ class Database:
                     record.thread_ts,
                     record.channel_id,
                     record.user_id,
-                    record.message_text,
+                    record.user_query,
                     record.intent_type,
                     None,  # deprecated urgency
                     record.response_text,
@@ -280,7 +277,7 @@ class Database:
             else:
                 cursor.execute("""
                     INSERT INTO conversations (
-                        message_ts, thread_ts, channel_id, user_id, message_text,
+                        message_ts, thread_ts, channel_id, user_id, user_query,
                         intent_type, response_text, confidence,
                         needs_clarification, escalated, escalation_reason,
                         docs_cited, reasoning_summary, processing_time,
@@ -292,7 +289,7 @@ class Database:
                     record.thread_ts,
                     record.channel_id,
                     record.user_id,
-                    record.message_text,
+                    record.user_query,
                     record.intent_type,
                     record.response_text,
                     record.confidence,
@@ -412,13 +409,13 @@ class Database:
             
             # Get common topics (extract from message text - simplified)
             cursor.execute("""
-                SELECT message_text FROM conversations
+                SELECT user_query FROM conversations
                 WHERE user_id = ?
                 ORDER BY created_at DESC
                 LIMIT 20
             """, (user_id,))
             
-            messages = [row["message_text"] for row in cursor.fetchall()]
+            messages = [row["user_query"] for row in cursor.fetchall()]
             # Simple topic extraction (in real implementation, use NLP)
             common_topics = []  # Placeholder
             

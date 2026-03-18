@@ -37,7 +37,7 @@ Return ONLY the JSON object, no markdown wrapper."""
 
 
 async def _filter_files(
-    message_text: str,
+    user_query: str,
     files: List[ResearchFile],
 ) -> List[ResearchFile]:
     """Filter files based on relevance to the question."""
@@ -59,7 +59,7 @@ async def _filter_files(
 
     files_text = "\n\n".join(file_descriptions)
 
-    prompt = f"""User question: "{message_text}"
+    prompt = f"""User question: "{user_query}"
 
 Retrieved files:
 {files_text}
@@ -95,14 +95,14 @@ Return JSON with relevant file paths and filtering reason."""
 
         # If filtering removed everything, keep top 2 by relevance score
         if not filtered and files:
-            filtered = sorted(files, key=lambda x: x.relevance_score, reverse=True)[:2]
+            filtered = sorted(files, key=lambda x: len(x.matches), reverse=True)[:2]
 
         return filtered
     except Exception as e:
         logger = get_logger()
         logger.logger.warning(f"[RelevanceFilter] Parse error: {e}, keeping all files")
         # On error, return top files by relevance score
-        return sorted(files, key=lambda x: x.relevance_score, reverse=True)[:8]
+        return sorted(files, key=lambda x: len(x.matches), reverse=True)[:8]
 
 
 def cli_relevance_filter(state: ConversationState) -> ConversationState:
@@ -112,7 +112,7 @@ def cli_relevance_filter(state: ConversationState) -> ConversationState:
     logger = get_logger()
 
     user_id = state["user_id"]
-    message_text = state["message_text"]
+    user_query = state["user_query"]
     research_files = state.get("research_files", [])
 
     if not research_files:
@@ -120,7 +120,7 @@ def cli_relevance_filter(state: ConversationState) -> ConversationState:
 
     try:
         # Filter files
-        filtered_files = asyncio.run(_filter_files(message_text, research_files))
+        filtered_files = asyncio.run(_filter_files(user_query, research_files))
 
         # Update state with filtered files
         state["research_files"] = filtered_files

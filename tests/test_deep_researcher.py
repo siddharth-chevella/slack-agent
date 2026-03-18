@@ -146,7 +146,6 @@ class TestDeepResearcher:
                 path="test1.py",
                 content="test",
                 matches=["match1"],
-                relevance_score=0.8,
                 source="ripgrep",
                 language="python",
                 retrieval_reason="test",
@@ -155,7 +154,6 @@ class TestDeepResearcher:
                 path="test2.py",
                 content="test",
                 matches=["match1"],
-                relevance_score=0.7,
                 source="ripgrep",
                 language="python",
                 retrieval_reason="test",
@@ -171,7 +169,6 @@ class TestDeepResearcher:
                 path="cdc_handler.py",
                 content="CDC implementation for PostgreSQL",
                 matches=["cdc", "postgres"],
-                relevance_score=0.9,
                 source="ripgrep",
                 language="python",
                 retrieval_reason="",
@@ -211,7 +208,6 @@ class TestDeepResearcher:
                 path="connectors/postgres/cdc_handler.py",
                 content="CDC handler implementation",
                 matches=["def handle_cdc", "class CDC"],
-                relevance_score=0.9,
                 source="ripgrep",
                 language="python",
                 retrieval_reason="Found while searching for: cdc postgres",
@@ -242,14 +238,12 @@ class TestResearchFile:
             path="test.py",
             content="print('hello')",
             matches=["print('hello')"],
-            relevance_score=0.8,
             source="ripgrep",
             language="python",
             retrieval_reason="Testing",
         )
         assert rf.path == "test.py"
         assert rf.language == "python"
-        assert rf.relevance_score == 0.8
         assert rf.source == "ripgrep"
 
 
