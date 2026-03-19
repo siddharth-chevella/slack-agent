@@ -337,7 +337,7 @@ Type 'commands' to see executed commands (coming soon).
 
         for i, file in enumerate(files[:10], 1):  # Show top 10
             self.console.print(f"\n[bold cyan]{i}.[/bold cyan] [yellow]{file.path}[/yellow]")
-            self.console.print(f"   [dim]Source: {file.source} | Language: {file.language} | Score: {file.relevance_score:.2f}[/dim]")
+            self.console.print(f"   [dim]Source: {file.source} | Language: {file.language} | Score: {len(file.matches)}[/dim]")
             self.console.print(f"   [dim]Why: {file.retrieval_reason}[/dim]")
 
             if file.matches:
@@ -402,7 +402,7 @@ Type 'commands' to see executed commands (coming soon).
         # Add conversation context
         context = self.thread.get_context()
         if context:
-            state["message_text"] = f"{context}\n\nUser: {message}"
+            state["user_query"] = f"{context}\n\nUser: {message}"
 
         # Shared progress events for live CLI display (deep_researcher calls _cli_progress_callback)
         progress_events: List[Dict] = []

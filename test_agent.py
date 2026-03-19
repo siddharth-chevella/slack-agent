@@ -119,7 +119,7 @@ def print_research_files(files: List[Any], iteration: int = None):
 
     for i, f in enumerate(files[:5], 1):
         path = getattr(f, "path", str(f))[:45]
-        score = getattr(f, "relevance_score", 0)
+        score = len(getattr(f, "matches", []))
         source = getattr(f, "source", "ripgrep")
         reason = (getattr(f, "retrieval_reason", "") or "")[:80].replace("\n", " ")
 

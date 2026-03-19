@@ -101,7 +101,7 @@ def list_conversations(
     search_sql = ""
     search_params: list = []
     if q and q.strip():
-        search_sql = " AND (message_text LIKE ? OR response_text LIKE ?)"
+        search_sql = " AND (user_query LIKE ? OR response_text LIKE ?)"
         term = f"%{q.strip()}%"
         search_params = [term, term]
 
@@ -119,7 +119,7 @@ def list_conversations(
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT id, message_ts, thread_ts, channel_id, user_id, message_text,
+            SELECT id, message_ts, thread_ts, channel_id, user_id, user_query,
                    intent_type, response_text, confidence,
                    needs_clarification, escalated, escalation_reason,
                    docs_cited, reasoning_summary, processing_time,
@@ -154,7 +154,7 @@ def get_conversation(conversation_id: int) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, message_ts, thread_ts, channel_id, user_id, message_text,
+            SELECT id, message_ts, thread_ts, channel_id, user_id, user_query,
                    intent_type, response_text, confidence,
                    needs_clarification, escalated, escalation_reason,
                    docs_cited, reasoning_summary, processing_time,

@@ -7,7 +7,6 @@ Formats the final answer and persists to DB. No Slack API (no send_message).
 from __future__ import annotations
 import asyncio
 import json
-import re
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -16,8 +15,7 @@ from agent.persistence import get_database
 from agent.logger import get_logger
 from agent.llm import get_chat_completion
 from agent.config import ABOUT_OLAKE
-
-_PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
+from agent.utils.parser import JSON_FENCE_RE as _PARSE_RE_FENCE
 
 _SENTENCE_ENDINGS = (".", "!", "?", "…", ":", "```")
 
@@ -96,10 +94,9 @@ def _build_doc_citations(docs: list) -> str:
 
 async def _polish_answer(
     draft: str,
-    message_text: str,
+    user_query: str,
     files: list,
     confidence: float,
-    problem_summary: str,
     is_conceptual: bool = False,
     state: ConversationState | None = None,
 ) -> str:
@@ -117,8 +114,7 @@ async def _polish_answer(
     if is_conceptual:
         conceptual_instruction = "\n\nThis is a conceptual question — answer from your knowledge about OLake without needing file references."
 
-    prompt = f"""User question: "{message_text}"
-Problem summary: {problem_summary}
+    prompt = f"""User question: "{user_query}"
 {conceptual_instruction}
 
 Draft answer (refine this — if empty, write from scratch using ONLY the reference files below):
@@ -151,11 +147,10 @@ def cli_solution_provider(state: ConversationState) -> ConversationState:
     logger = get_logger()
 
     user_id = state["user_id"]
-    message_text = state["message_text"]
+    user_query = state["user_query"]
     response_text = state.get("response_text", "") or ""
     confidence = state.get("research_confidence", 0.0)
     research_files = state.get("research_files", [])
-    problem_summary = state.get("problem_summary") or message_text
     is_conceptual = state.get("is_conceptual", False)
 
     try:
@@ -171,10 +166,9 @@ def cli_solution_provider(state: ConversationState) -> ConversationState:
             try:
                 response_text = asyncio.run(_polish_answer(
                     draft=response_text,
-                    message_text=message_text,
+                    user_query=user_query,
                     files=research_files,
                     confidence=confidence,
-                    problem_summary=problem_summary,
                     is_conceptual=is_conceptual,
                     state=state,
                 ))
@@ -217,7 +211,7 @@ def cli_solution_provider(state: ConversationState) -> ConversationState:
                 thread_ts=state.get("thread_ts"),
                 channel_id=state.get("channel_id", "cli_channel"),
                 user_id=user_id,
-                message_text=message_text,
+                user_query=user_query,
                 intent_type=str(state.get("intent_type", "")),
                 response_text=final_message,
                 confidence=confidence,

@@ -13,8 +13,6 @@ Redesign principles:
 
 from __future__ import annotations
 import asyncio
-import json
-import re
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -24,17 +22,7 @@ from agent.persistence import get_database
 from agent.logger import get_logger, EventType
 from agent.llm import get_chat_completion
 from agent.config import ABOUT_OLAKE
-
-_PARSE_RE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
-
-
-def _parse_json(text: str | None) -> list:
-    if not text:
-        raise ValueError("LLM returned empty")
-    text = _PARSE_RE_FENCE.sub("", text.strip())
-
-    print("clarification_asker: text:", text)
-    return json.loads(text)
+from agent.utils.parser import parse_json_list as _parse_json
 
 
 # System prompt for fallback question generation
@@ -86,7 +74,7 @@ async def clarification_asker(state: ConversationState) -> Dict[str, Any]:
     user_id    = state["user_id"]
     channel_id = state["channel_id"]
     thread_ts  = state.get("thread_ts") or state["message_ts"]
-    message_text = state["message_text"]
+    user_query = state["user_query"]
 
     # Questions may already be set by deep_reasoner
     questions: List[str] = state.get("clarification_questions", [])
@@ -102,14 +90,12 @@ async def clarification_asker(state: ConversationState) -> Dict[str, Any]:
 
         # Generate questions if reasoner didn't provide any
         if not questions:
-            problem_summary = state.get("problem_summary") or message_text
             gaps = []
             for it in state.get("reasoning_iterations", []):
                 gaps.extend(it.identified_gaps)
             gaps = list(dict.fromkeys(gaps))[:4]
 
-            prompt = f"""User asked: "{message_text}"
-Problem summary: {problem_summary}
+            prompt = f"""User asked: "{user_query}"
 Internal Agent Gaps: {gaps} (Do NOT ask the user to solve these gaps for you. Only ask for context about their setup.)
 
 Generate 1-2 clarifying questions about the USER'S specific setup or intent. Return JSON array only."""
@@ -155,7 +141,7 @@ Generate 1-2 clarifying questions about the USER'S specific setup or intent. Ret
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                message_text=message_text,
+                user_query=user_query,
                 intent_type=str(state.get("intent_type", "")),
                 response_text=message_body,
                 confidence=state.get("final_confidence", 0.0),

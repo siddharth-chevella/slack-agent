@@ -55,31 +55,12 @@ def _build_history_block(state: ConversationState, max_messages: int = 6) -> str
     """Build a short conversation history snippet from previous messages and thread context."""
     lines: List[str] = []
     thread_messages = state.get("thread_context", []) or []
-    # #region debug log
-    try:
-        import json
-        _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
-        _first = thread_messages[0] if thread_messages else {}
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H3", "location": "solution_provider.py:_build_history_block", "message": "building history block", "data": {"thread_messages_count": len(thread_messages), "first_msg_sample_keys": list(_first.keys()) if _first else []}, "timestamp": __import__("time").time() * 1000}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     for msg in thread_messages[-max_messages:]:
         user = msg.get("user_id") or msg.get("user") or msg.get("username") or "user"
-        text = (msg.get("message_text") or msg.get("text") or "").strip()
+        text = (msg.get("user_query") or msg.get("text") or "").strip()
         if not text:
             continue
         lines.append(f"- {user}: {text}")
-    # #region debug log
-    try:
-        import json
-        _log_path = "/Users/siddharth/Desktop/Code/slack-agent/.cursor/debug-2d25db.log"
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId": "2d25db", "hypothesisId": "H4", "location": "solution_provider.py:_build_history_block_result", "message": "history block result", "data": {"lines_count": len(lines), "history_preview": (("\n".join(lines[-max_messages:]))[:200] if lines else "(none)"), "has_text_key": bool(thread_messages and (thread_messages[0].get("text") is not None)), "has_message_text_key": bool(thread_messages and (thread_messages[0].get("message_text") is not None))}, "timestamp": __import__("time").time() * 1000}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     if not lines:
         return "(none)"
     return "\n".join(lines[-max_messages:])
@@ -101,18 +82,14 @@ def _build_files_block(research_files: List[Any], max_files: int = 8, max_snippe
 
 async def _generate_solution(state: ConversationState) -> str:
     """Generate the final answer from context. Always returns a solution (answer or clarifying questions)."""
-    message_text = state["message_text"]
-    problem_summary = state.get("problem_summary") or message_text
+    user_query = state["user_query"]
     research_files = state.get("research_files", [])
 
     history_block = _build_history_block(state)
     files_block = _build_files_block(research_files)
 
     user_prompt = f"""User question:
-{message_text}
-
-Problem summary (may be approximate):
-{problem_summary}
+{user_query}
 
 Conversation so far (most recent messages last):
 {history_block}
@@ -148,7 +125,7 @@ def solution_provider(state: ConversationState) -> ConversationState:
     user_id = state["user_id"]
     channel_id = state["channel_id"]
     thread_ts = state.get("thread_ts") or state["message_ts"]
-    message_text = state["message_text"]
+    user_query = state["user_query"]
 
     try:
         slack_client = create_slack_client()
@@ -177,7 +154,7 @@ def solution_provider(state: ConversationState) -> ConversationState:
                     thread_ts=thread_ts,
                     channel_id=channel_id,
                     user_id=user_id,
-                    message_text=message_text,
+                    user_query=user_query,
                     intent_type=str(state.get("intent_type", "")),
                     response_text=final_message,
                     confidence=state.get("research_confidence", 0.0),
@@ -236,7 +213,7 @@ def solution_provider(state: ConversationState) -> ConversationState:
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                message_text=message_text,
+                user_query=user_query,
                 intent_type=str(state.get("intent_type", "")),
                 response_text=final_message,
                 confidence=state.get("research_confidence", 0.0),
