@@ -26,7 +26,7 @@ from agent.codebase_search import (
     find_definitions,
     read_file,
 )
-from agent.config import ABOUT_OLAKE, ABOUT_OLAKE_REPO_INFO
+from agent.config import ABOUT_COMPANY, ABOUT_REPOS, AGENT_NAME, COMPANY_NAME
 from agent.llm import get_chat_completion
 from agent.logger import get_logger
 from agent.state import ConversationState, ResearchFile
@@ -49,24 +49,24 @@ _ZERO_NEW_FILES_FORCE_EXIT = 5
 # Fire the metacognitive reflection LLM call after this many consecutive zero-gain iterations.
 _REFLECTION_AFTER_ITERS = 3
 # Compact raw history entries older than the last window into a single summary block.
-_HISTORY_COMPACT_INTERVAL = 4
+_HISTORY_COMPACT_INTERVAL = 8
 
 # ---------------------------------------------------------------------------
 # System prompt (static — describes the agent role and tool contract only)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT_TEMPLATE = """\
-You are Alex, a senior support engineer at OLake/Datazip. Think and reason explicitly \
+You are {agent_name}, a senior support engineer at {company_name}. Think and reason explicitly \
 in first person: use "I" in your reasoning (e.g. "I need to search for ...", \
 "I will look for ...", "I should target ...").
 
-About OLake:
-{about_olake}
+About {company_name}:
+{about_company}
 
 Repositories available for search:
-{about_olake_repo_info}
+{about_repos}
 
-Your job: Research the OLake codebase to find the information needed to answer the \
+Your job: Research the codebase to find the information needed to answer the \
 user's question. There is NO vector search and NO semantic search.
 
 TOOLS YOU CAN CALL:
@@ -85,7 +85,7 @@ already know which specific repo contains the answer.
    - Read a bounded line range from a specific file.
    - If you already have a file+line hit from search_code, use read_file next.
 
-GO/OLAKE NAMING — CRITICAL: OLake is written in Go. Use PascalCase for exported \
+GO NAMING — when searching Go codebases: use PascalCase for exported \
 identifiers (ExpireSnapshot) and camelCase for unexported (expireSnapshot). \
 Never use Python-style snake_case — it will NOT match.
 
@@ -96,25 +96,21 @@ PATTERN QUALITY RULES:
 - One regex covering all related variants beats multiple narrow searches
 - Use SEARCH HISTORY to avoid repeating searches that already returned useful results
 
-ERROR STRING SEARCH PROTOCOL:
-When the user reports a CLI/runtime error message:
-1. Search for it once with path="all". If it returns 0 results: this is DEFINITIVE EVIDENCE \
-the string is runtime-generated (e.g. fmt.Sprintf("... %%s", name)), docs-only, or from a \
-dependency. Do NOT retry the same string.
+GO-TO Strategy to peform smart searches:
+1. Search for the pattern once with path="all". If it returns 0 results: this is a probable indication \
+that the pattern is not in the codebase. Do NOT retry the same pattern.
 2. Immediately pivot to searching for PARTIAL TOKENS and Go identifiers related to the feature: \
 struct field names, function names, config keys, doc file paths for the relevant writer/format.
-3. Reason through this hypothesis list explicitly in your "thinking":
-   a. String assembled at runtime in Go source (most common)
-   b. String exists only in olake-docs / website
-   c. String comes from a third-party library
-   d. Feature is version-gated or behind a flag
-
-STOPPING RULE — READ THIS CAREFULLY:
-Once you have confirmed the user's error string is not in the codebase (0-result search \
-across all repos), STOP searching for it and return actions: [] immediately. \
-Write in your "thinking": "String not found in codebase. Handing off with bounded answer." \
+3. If the data is not found even after multiple iterations, stop searching for it and return actions: [] immediately. \
+Write in your "thinking": "Pattern not found in codebase. Handing off with bounded answer." \
 The solution provider will produce a practical answer from docs and product knowledge. \
 Do NOT wait until the iteration limit — stop as soon as you have enough signal.
+
+CRITICAL — STOPPING RULES:
+- Only return empty actions [] if the answer (including any specific URL, value, or fact the user \
+asked for) is EXPLICITLY AND VERBATIM present in the conversation context above. \
+Do NOT assume something was previously provided if you cannot quote it from the context. \
+If the exact information is not visible in the context, search for it.
 
 CRITICAL — OUTPUT RULES:
 1. Your ENTIRE response must be a single JSON object. No prose, no preamble, no explanation \
@@ -156,8 +152,10 @@ RULES:
 
 def _build_system_prompt() -> str:
     return _SYSTEM_PROMPT_TEMPLATE.format(
-        about_olake=(ABOUT_OLAKE or "").strip(),
-        about_olake_repo_info=(ABOUT_OLAKE_REPO_INFO or "").strip(),
+        agent_name=AGENT_NAME,
+        company_name=COMPANY_NAME,
+        about_company=(ABOUT_COMPANY or "").strip(),
+        about_repos=(ABOUT_REPOS or "").strip(),
     )
 
 
@@ -193,6 +191,7 @@ def _build_user_message(
     search_history_entries: List[str],
     conclusions_log: Optional[List[str]] = None,
     system_note: Optional[str] = None,
+    recent_reads: Optional[List[tuple]] = None,
 ) -> str:
     summary_block = (thread_summary or "").strip() or "(none — no prior conversation summary)"
     context_block = _format_thread_context(thread_context)
@@ -208,6 +207,21 @@ def _build_user_message(
     note_block = ""
     if system_note:
         note_block = f"\n---\nSYSTEM NOTE: {system_note}\n"
+
+    # Survive history compaction: always include the last 3 read_file results verbatim
+    # so the planner never needs to re-read a file it already fetched this session.
+    recent_reads_block = ""
+    if recent_reads:
+        parts = [
+            f"=== {label} ===\n{content}"
+            for label, content in recent_reads
+        ]
+        recent_reads_block = (
+            "\n---\nRECENTLY READ FILE CONTENT "
+            "(last reads — check here before issuing another read_file for the same range):\n"
+            + "\n\n".join(parts)
+            + "\n"
+        )
 
     return f"""\
 USER QUESTION:
@@ -225,10 +239,12 @@ Recent messages in this thread (not yet in summary):
 ---
 SEARCH HISTORY (what you've searched and found so far this session — compact):
 {history_block}
-{note_block}
+{recent_reads_block}{note_block}
 ---
 Based on the above, decide what to search next.
-Return empty actions [] if you already have enough to answer accurately.\
+Return empty actions [] ONLY if the exact information needed to answer (including any specific URL, \
+value, or fact) is explicitly and verbatim present in the conversation context or search results above. \
+If you cannot quote the answer from the context, search for it — do not assume it was previously provided.\
 """
 
 
@@ -378,11 +394,11 @@ class DeepResearcher:
     """
     Alex — Senior OLake Support Engineer.
 
-    Iterative planner + searcher. Keeps raw file content OUT of the planner's
-    context; only compact descriptions flow back into each iteration.
+    Iterative planner + searcher. Full read_file content and recent reads are
+    fed back to the planner each iteration; search results use compact previews.
     """
 
-    def __init__(self, max_iterations: int = 20):
+    def __init__(self, max_iterations: int = 12):
         self.max_iterations = max_iterations
         self._system_prompt = _build_system_prompt()
 
@@ -398,6 +414,9 @@ class DeepResearcher:
         thinking_log: List[str] = []
         conclusions_log: List[str] = []
         last_is_conceptual: bool = False
+        # Tracks the last 3 read_file results as (label, content) tuples so they
+        # survive history compaction and are always visible to the planner.
+        recent_reads: List[tuple] = []
 
         # --- Stuck-detector state ---
         consecutive_zero_new_files: int = 0
@@ -455,6 +474,7 @@ class DeepResearcher:
                         search_history_entries=search_history_entries,
                         conclusions_log=conclusions_log,
                         system_note=pending_system_note,
+                        recent_reads=recent_reads or None,
                     )
                     pending_system_note = None  # consumed
 
@@ -505,6 +525,11 @@ class DeepResearcher:
                         reason = "conceptual question" if is_conceptual else "planner has enough info"
                         print(f"[DeepResearcher]   ✓ Done ({reason}) — stopping search loop")
                         log.info("[DeepResearcher] done after iter=%d reason=%s", iteration, reason)
+                        # When the planner decided it can answer from context (no actions, no files),
+                        # flag as conceptual so SolutionProvider proceeds to LLM generation instead
+                        # of the "no files found" early-exit path.
+                        if not actions and not is_conceptual:
+                            last_is_conceptual = True
                         break
 
                     # --- Pattern-repeat stuck detector ---
@@ -576,8 +601,8 @@ class DeepResearcher:
                             block = f"Iteration {_iter} — {label}\n  → 0 results"
                         else:
                             preview = "\n".join(
-                                f"  {h.path}:{h.line}  → {h.text[:180]}"
-                                for h in hits[:5]
+                                f"  {h.path}:{h.line}  → {h.text[:250]}"
+                                for h in hits[:8]
                             )
                             block = f"Iteration {_iter} — {label}\n{preview}"
                         return action, files, block
@@ -597,8 +622,8 @@ class DeepResearcher:
                             block = f"Iteration {_iter} — {label}\n  → 0 results"
                         else:
                             preview = "\n".join(
-                                f"  {h.path}:{h.line}  → {h.text[:180]}"
-                                for h in hits[:5]
+                                f"  {h.path}:{h.line}  → {h.text[:250]}"
+                                for h in hits[:8]
                             )
                             block = f"Iteration {_iter} — {label}\n{preview}"
                         return action, files, block
@@ -681,12 +706,22 @@ class DeepResearcher:
                             search_pattern=f"read_file:{action.get('path', '')}",
                         )
                         all_research_files[rf.path] = rf
-                        _preview_lines = (file_text or "").splitlines()[:12]
-                        _preview = "\n".join(f"  {ln}" for ln in _preview_lines)
-                        if line_count > 12:
-                            _preview += "\n  … (truncated)"
+                        # Track full content in recent_reads — it survives compaction and
+                        # is injected verbatim into every subsequent iteration's user message.
+                        recent_reads.append((label, file_text or ""))
+                        recent_reads = recent_reads[-3:]  # keep last 3 reads only
+                        # History entry uses a capped preview to avoid ballooning context.
+                        # The full content is always accessible via the recent_reads block.
+                        _HISTORY_READ_CAP = 50
+                        _hist_lines = (file_text or "").splitlines()
+                        _hist_preview = "\n".join(_hist_lines[:_HISTORY_READ_CAP])
+                        if len(_hist_lines) > _HISTORY_READ_CAP:
+                            _hist_preview += (
+                                f"\n… [{len(_hist_lines) - _HISTORY_READ_CAP} more lines — "
+                                "full content available in RECENTLY READ FILE CONTENT block above]"
+                            )
                         action_blocks.append(
-                            f"Iteration {iteration} — {label}\n  → {line_count} lines read (preview: {_preview})"
+                            f"Iteration {iteration} — {label}\n  → {line_count} lines read:\n{_hist_preview}"
                         )
                     except Exception as read_err:
                         action_blocks.append(

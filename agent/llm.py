@@ -63,7 +63,7 @@ async def _get_gemini_completion(
             for msg in messages
         )
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=Config.GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=temperature,
@@ -92,7 +92,7 @@ async def _get_openai_completion(
         base_url = Config.OPENROUTER_BASE_URL
     else:
         api_key = Config.OPENAI_API_KEY
-        model = "gpt-4-turbo-preview"
+        model = Config.OPENAI_MODEL
         base_url = None
 
     timeout = Config.LLM_REQUEST_TIMEOUT_SECONDS

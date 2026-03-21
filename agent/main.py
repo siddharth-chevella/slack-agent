@@ -1,13 +1,13 @@
 """
-Main entry point for OLake Slack Community Agent.
+Main entry point for the Slack Community Agent.
 
 HTTP webhook server for Slack Events API.
 
 Startup sequence:
   1. Validate configuration
   2. auth.test → cache bot's own user ID
-  3. users.list → build slack_name → user_id cache for the OLake team
-  4. Load olake-team.json
+  3. users.list → build slack_name → user_id cache for the team
+  4. Load config/team.json
   5. Initialize DB and agent graph
   6. Start Flask webhook server
 """
@@ -17,7 +17,7 @@ from flask import Flask, request, jsonify
 import threading
 from typing import Dict, Any
 
-from agent.config import Config
+from agent.config import Config, AGENT_NAME, COMPANY_NAME
 from agent.slack_client import create_slack_client
 from agent.graph import get_agent_graph
 from agent.state import create_initial_state
@@ -85,9 +85,8 @@ def initialize_team() -> None:
 # Webhook
 # ---------------------------------------------------------------------------
 
-@app.route(Config.WEBHOOK_PATH, methods=['POST'])
-def slack_events():
-    """Handle Slack Events API webhook."""
+def _slack_events_handler():
+    """Handle Slack Events API webhook (shared by WEBHOOK_PATH and optional POST /)."""
     try:
         data = request.get_json()
 
@@ -142,6 +141,22 @@ def slack_events():
             stack_trace=str(e),
         )
         return jsonify({"error": str(e)}), 500
+
+
+app.add_url_rule(
+    Config.WEBHOOK_PATH,
+    endpoint="slack_events",
+    view_func=_slack_events_handler,
+    methods=["POST"],
+)
+# Slack "Request URL" is often pasted as the ngrok base URL without /slack/events — accept POST / too.
+if Config.WEBHOOK_PATH != "/":
+    app.add_url_rule(
+        "/",
+        endpoint="slack_events_root",
+        view_func=_slack_events_handler,
+        methods=["POST"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +215,8 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         "status": "healthy",
-        "agent": "OLake Slack Community Agent",
+        "agent": f"{COMPANY_NAME} Slack Community Agent",
+        "agent_name": AGENT_NAME,
         "version": "1.0.0",
     }), 200
 
@@ -222,7 +238,7 @@ def get_stats():
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="OLake Slack Community Agent")
+    parser = argparse.ArgumentParser(description="Slack Community Agent")
     parser.add_argument('--port', type=int, default=Config.WEBHOOK_PORT)
     parser.add_argument('--validate-config', action='store_true')
     parser.add_argument('--stats', action='store_true')
@@ -248,15 +264,21 @@ def main():
 
     Config.print_config()
 
-    # Initialize DB and agent graph
-    get_database()
+    # Initialize DB — verify connection before doing anything else
+    db = get_database()
+    try:
+        db.check_connection()
+    except RuntimeError as exc:
+        print(f"\n❌ Database connection failed:\n   {exc}\n")
+        return 1
+
     get_agent_graph()
 
     # Initialize team resolver (bot user ID + slack_name→ID cache)
     initialize_team()
 
     logger.logger.info("=" * 60)
-    logger.logger.info("OLake Slack Community Agent Starting")
+    logger.logger.info("%s Slack Community Agent Starting (%s)", COMPANY_NAME, AGENT_NAME)
     logger.logger.info("=" * 60)
     logger.logger.info(f"Webhook: http://localhost:{args.port}{Config.WEBHOOK_PATH}")
     logger.logger.info(f"Health:  http://localhost:{args.port}/health")

@@ -1,13 +1,11 @@
 """
-Minimal team utilities: load olake-team.json, bot user ID, org-member detection, and mention resolution.
+Team utilities: load config/team.json, bot user ID, and org-member detection.
 
-Used by main (startup), context_builder (org_member_replied), and escalation (resolve_mention).
-Escalation routing itself is done in escalation_handler via LLM (prompt + query).
+Used by main (startup) and context_builder (org_member_replied detection).
 """
 
 import json
 import logging
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from agent.config import Config
@@ -21,7 +19,7 @@ _bot_user_id: Optional[str] = None
 
 
 def load_team() -> Dict:
-    """Load team data from olake-team.json."""
+    """Load team data from config/team.json."""
     global _team_data, _all_members
     path = Config.TEAM_FILE
     try:
@@ -36,10 +34,10 @@ def load_team() -> Dict:
                     "desc": info.get("desc", ""),
                     "dept": dept,
                 })
-        log.info(f"Loaded {len(_all_members)} team members from {path}")
+        log.info("Loaded %d team members from %s", len(_all_members), path)
         return raw
     except Exception as e:
-        log.error(f"Failed to load {path}: {e}")
+        log.error("Failed to load %s: %s", path, e)
         return {}
 
 
@@ -61,26 +59,19 @@ def build_name_to_id_cache(slack_users: List[Dict]) -> None:
         if uid:
             cache[sn] = uid
         else:
-            log.warning(f"Could not resolve Slack user ID for slack_name='{sn}'")
+            log.warning("Could not resolve Slack user ID for slack_name=%r", sn)
     _slack_name_to_id = cache
-    log.info(f"Resolved {len(cache)}/{len(_all_members)} team members to Slack IDs")
+    log.info("Resolved %d/%d team members to Slack IDs", len(cache), len(_all_members))
 
 
 def set_bot_user_id(user_id: str) -> None:
     global _bot_user_id
     _bot_user_id = user_id
-    log.info(f"Bot user ID set to {user_id}")
+    log.info("Bot user ID set to %s", user_id)
 
 
 def get_bot_user_id() -> Optional[str]:
     return _bot_user_id
-
-
-def is_org_member_by_name(display_name: str) -> bool:
-    if not _all_members:
-        load_team()
-    dn = display_name.strip().lower()
-    return any(m["slack_name"].lower() == dn for m in _all_members)
 
 
 def is_org_member_by_id(user_id: str) -> bool:
@@ -92,9 +83,3 @@ def get_all_members_flat() -> List[Dict]:
     if not _all_members:
         load_team()
     return list(_all_members)
-
-
-def resolve_mention(slack_name: str) -> str:
-    """Return '<@USERID>' if resolved, else '@slack_name'."""
-    uid = _slack_name_to_id.get(slack_name)
-    return f"<@{uid}>" if uid else f"@{slack_name}"

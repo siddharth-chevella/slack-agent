@@ -1,0 +1,40 @@
+# ── stage 1: install Python deps via uv ──────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock ./
+# Install runtime deps only (no dev extras) into /build/.venv
+RUN uv sync --frozen --no-dev
+
+# ── stage 2: runtime ─────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# ripgrep — needed by codebase_search.py for repo search
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the virtualenv built in stage 1
+COPY --from=builder /build/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Application source
+COPY agent/   ./agent/
+COPY config/  ./config/
+
+# Runtime dirs (logs, data) are expected to be mounted as volumes.
+# Create them so the app doesn't crash if volumes aren't mounted.
+RUN mkdir -p data logs .github_repos
+
+# Entrypoint
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8001
+
+CMD ["python", "-m", "agent.main"]

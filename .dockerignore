@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+
+# Python cache / build artefacts
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+dist
+build
+*.egg
+
+# Virtual environments
+.venv
+venv
+env
+
+# Local data and logs (mounted as Docker volumes at runtime)
+data/
+logs/
+.github_repos/
+cache/
+
+# Test artefacts
+tests/
+.pytest_cache
+.coverage
+htmlcov/
+
+# Environment files with secrets (injected via env_file in compose)
+.env
+# keep .env.example in image context so README references work
+
+# IDE / OS noise
+.cursor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode
+.idea
+
+# Docs and scripts not needed in the image
+docs/
+scripts/
+README.md
+*.sh

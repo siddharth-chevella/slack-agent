@@ -6,19 +6,18 @@ Designed to run as a cron job for background synchronization.
 Pulls latest changes for all tracked repositories.
 
 Usage:
-  python sync_github_repos.py [--verbose]
+  python scripts/sync_repos.py [--verbose]
 
 Cron example (daily at 3 AM):
-  0 3 * * * cd /path/to/slack-agent && python sync_github_repos.py >> logs/github_sync.log 2>&1
+  0 3 * * * cd /path/to/slack-agent && python scripts/sync_repos.py >> logs/github_sync.log 2>&1
 """
 
 import sys
 import logging
 from pathlib import Path
-from datetime import datetime
 
-# Add project root to path
-project_root = Path(__file__).parent
+# scripts/ is one level below the project root
+project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from agent.github_repo_tracker import GitHubRepoTracker
@@ -52,8 +51,8 @@ def main():
     tracker = GitHubRepoTracker()
     
     if not tracker.repos:
-        log.warning("No repositories configured in github_repos.yaml")
-        log.info("Add repos to github_repos.yaml and run:")
+        log.warning("No repositories configured in config/repos.yaml")
+        log.info("Add repos to config/repos.yaml and run:")
         log.info("  python agent/github_repo_tracker.py add <name> <url>")
         return 0
     

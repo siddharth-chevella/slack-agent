@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 
+from agent.config import AGENT_NAME, COMPANY_NAME
 from agent.llm import get_chat_completion
 from agent.persistence import get_database
 from agent.utils.parser import parse_llm_json
@@ -34,18 +35,18 @@ log = logging.getLogger(__name__)
 # Prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
-You are a conversation memory manager for an OLake support agent called Alex.
+_SYSTEM_PROMPT = f"""\
+You are a conversation memory manager for a {COMPANY_NAME} support agent called {AGENT_NAME}.
 
 Your job: given the previous summary of a support thread (if any) and a set of \
 new conversation turns that are NOT yet reflected in that summary, produce one \
 updated, consolidated summary that covers everything — replacing the old summary.
 
 OUTPUT FORMAT — return ONLY valid JSON, no markdown fences, no extra text:
-{"summary": "..."}
+{{"summary": "..."}}
 
 WRITING RULES:
-- Write strictly in first person from Alex's perspective ("I", "I searched", \
+- Write strictly in first person from {AGENT_NAME}'s perspective ("I", "I searched", \
 "I answered", "The user asked", "I clarified").
 - The summary must stand alone — a reader with no prior context should fully \
 understand the conversation from it.
@@ -82,7 +83,7 @@ def _format_messages(messages: List[Dict]) -> str:
     for msg in messages:
         role = msg.get("role", "user")
         content = (msg.get("content") or "").strip()
-        label = "User" if role == "user" else "Agent (Alex)"
+        label = "User" if role == "user" else f"Agent ({AGENT_NAME})"
         lines.append(f"[{label}]: {content}")
     return "\n\n".join(lines)
 

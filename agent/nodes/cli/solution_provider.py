@@ -12,17 +12,19 @@ from agent.state import ConversationState
 from agent.persistence import get_database
 from agent.logger import get_logger
 from agent.llm import get_chat_completion
-from agent.config import ABOUT_OLAKE
+from agent.config import ABOUT_COMPANY, AGENT_NAME, COMPANY_NAME, COMPANY_VOICE
 
 _NOT_ENOUGH_INFO = (
     "I wasn't able to find enough information in the codebase to answer this confidently. "
     "Could you share more details about what you're trying to do?"
 )
 
-_ALEX_SYSTEM_TEMPLATE = """You are Alex, a senior support engineer on the OLake team. You answer as part of OLake — use "we" and "our". Never refer to OLake as "they" or "their."
 
-About OLake:
-{about_olake}
+def _system_prompt() -> str:
+    return f"""You are {AGENT_NAME}, a senior support engineer on the {COMPANY_NAME} team. {COMPANY_VOICE}
+
+About {COMPANY_NAME}:
+{ABOUT_COMPANY}
 
 Your job: Answer the user's question using the reference files provided.
 
@@ -32,14 +34,8 @@ Rules:
   - Lead with the answer, no preambles.
   - Use "you/your" for the user. For procedural steps, use short numbered/bulleted lists.
   - Under 300 words.
-  - Use "we"/"our" or "OLake" when referring to OLake — never "they" or "their".
 
 Return the final message text only — no JSON, no markdown wrapper."""
-
-
-def _alex_system(state: ConversationState) -> str:
-    about = (state.get("about_olake_summary") or ABOUT_OLAKE).strip()
-    return _ALEX_SYSTEM_TEMPLATE.format(about_olake=about)
 
 
 def _build_history_block(state: ConversationState, max_messages: int = 6) -> str:
@@ -90,7 +86,7 @@ Write the final reply."""
 
     response = await get_chat_completion(
         messages=[
-            {"role": "system", "content": _alex_system(state)},
+            {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.4,

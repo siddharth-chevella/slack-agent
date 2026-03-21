@@ -14,7 +14,7 @@ from typing import Dict, Any, List
 
 from agent.state import ConversationState
 from agent.persistence import get_database
-from agent.logger import get_logger, EventType
+from agent.logger import get_logger
 
 
 def build_context(state: ConversationState) -> ConversationState:
@@ -69,22 +69,6 @@ def build_context(state: ConversationState) -> ConversationState:
         print(
             f"[ContextBuilder] ✓ thread_id={thread_id}  messages={len(thread_context)}  "
             f"summary={'yes' if thread_summary else 'no'}"
-        )
-
-        logger.log_event(
-            event_type=EventType.CONTEXT_LOADED,
-            message=(
-                f"Context loaded: thread_id={thread_id}, "
-                f"messages={len(thread_context)}, "
-                f"summary={'yes' if thread_summary else 'no'}"
-            ),
-            user_id=user_id,
-            channel_id=channel_id,
-            metadata={
-                "thread_id": thread_id,
-                "thread_context_count": len(thread_context),
-                "has_summary": thread_summary is not None,
-            },
         )
 
     except Exception as e:

@@ -43,11 +43,11 @@ class GitHubRepoTracker:
         Initialize the tracker.
         
         Args:
-            config_path: Path to github_repos.yaml config file
+            config_path: Path to config/repos.yaml (defaults to project root config/repos.yaml)
         """
         self.project_root = Path(__file__).parent.parent
         self.repos_dir = self.project_root / ".github_repos"
-        self.config_path = config_path or (self.project_root / "github_repos.yaml")
+        self.config_path = config_path or (self.project_root / "config" / "repos.yaml")
         self.terminal = TerminalTool()
         
         self.repos: Dict[str, RepoConfig] = {}

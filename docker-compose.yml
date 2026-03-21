@@ -1,35 +1,88 @@
-# OLake Community Agent — Docker Compose (Qdrant Only)
+# OLake Slack Agent — full stack
 #
-# This configuration runs only Qdrant in Docker.
-# The RAG service and Agent service run locally with Python 3.11.
+# Services:
+#   postgres   — hosted persistence (always on)
+#   agent      — Slack webhook server
+#   eval       — evaluation dashboard (optional, use --profile eval to include)
 #
-# Usage:
-#   docker-compose up -d              # Start Qdrant
-#   docker-compose down               # Stop Qdrant
-#   docker-compose logs -f            # View Qdrant logs
+# Quick start:
+#   docker compose up -d                    # postgres + agent
+#   docker compose --profile eval up -d    # postgres + agent + eval dashboard
 #
-# Local development setup:
-#   1. Start Qdrant: docker-compose up -d
-#   2. Activate venv: source .venv/bin/activate
-#   3. Run RAG: python -m services.rag.server
-#   4. Run Agent: python -m agent.main
+# The agent & eval containers read their config from .env at project root.
+# Both services share the same named volumes so they read/write the same
+# data/, logs/, and .github_repos/ directories.
+
+x-common-env: &common-env
+  env_file: .env
+  # Override DATABASE_URL to use the compose service name as host
+  environment:
+    DATABASE_URL: postgresql://slack_agent:${POSTGRES_PASSWORD:-slack_agent_dev}@postgres:5432/slack_agent
 
 services:
-  # ── Qdrant Vector Database ─────────────────────────────────────────────
-  qdrant:
-    image: qdrant/qdrant:latest
-    restart: unless-stopped
-    ports:
-      - "6333:6333"   # REST API
-      - "6334:6334"   # gRPC
-    volumes:
-      - ./qdrant_data:/qdrant/storage  # Persist data locally
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 10s
 
-volumes:
-  qdrant_data:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slack_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slack_agent_dev}
+      POSTGRES_DB: slack_agent
+    ports:
+      # 5433 on host → 5432 in container; avoids clashing with a local Postgres
+      - "5433:5432"
+    volumes:
+      - slack_agent_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slack_agent -d slack_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Slack Agent ─────────────────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    restart: unless-stopped
+    <<: *common-env
+    ports:
+      - "${WEBHOOK_PORT:-8001}:8001"
+    volumes:
+      # Persist DB, logs, and cloned repos across restarts / rebuilds
+      - agent_data:/app/data
+      - agent_logs:/app/logs
+      - github_repos:/app/.github_repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Eval Dashboard (optional) ────────────────────────────────────────────────
+#   eval:
+#     profiles: ["eval"]
+#     build:
+#       context: .
+#       dockerfile: docker/Dockerfile.eval
+#     restart: unless-stopped
+#     <<: *common-env
+#     ports:
+#       - "${EVAL_APP_PORT:-8002}:8002"
+#     volumes:
+#       - agent_data:/app/data
+#       - agent_logs:/app/logs
+#     depends_on:
+#       postgres:
+#         condition: service_healthy
+
+# volumes:
+#   slack_agent_pgdata:
+#   agent_data:
+#   agent_logs:
+#   github_repos:

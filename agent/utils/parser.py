@@ -47,7 +47,7 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     """
     Try to pull the first well-formed JSON object out of text that may have
     prose before/after it (e.g. the model wrote a paragraph then the JSON).
-    Tries three progressively looser strategies before giving up.
+    Tries progressively looser strategies before giving up.
     """
     # Strategy 1: text starts right at the JSON object (happy path via caller)
     start = text.find('{')
@@ -76,6 +76,20 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
 
+    # Strategy 5: truncated-response recovery — the model ran out of tokens mid-JSON.
+    # Extract whatever string fields are present and return a graceful hand-off result
+    # (empty actions) so the research loop doesn't crash entirely.
+    thinking_match = re.search(r'"thinking"\s*:\s*"((?:[^"\\]|\\.)*)', text[start:], re.DOTALL)
+    intent_match = re.search(r'"search_intent"\s*:\s*"((?:[^"\\]|\\.)*)', text[start:], re.DOTALL)
+    if thinking_match:
+        return {
+            "thinking": thinking_match.group(1).rstrip("\\"),
+            "search_intent": (intent_match.group(1).rstrip("\\") if intent_match else ""),
+            "actions": [],
+            "is_conceptual": False,
+            "_truncated": True,
+        }
+
     return None
 
 
@@ -88,8 +102,9 @@ def parse_llm_json(text: str | None) -> Dict[str, Any]:
       - JSON wrapped in ```/```json fences
       - Prose preamble before the JSON object (model "thinks out loud")
     """
-    if not text:
-        raise ValueError("LLM returned empty response")
+    if text is None or not str(text).strip():
+        # Match unparseable-json path so callers (e.g. deep_researcher) can handle without try/except.
+        return {"error": "LLM returned empty response"}
 
     # First try: extract the first fenced JSON block, if present.
     fenced = _extract_fenced_json_block(text)

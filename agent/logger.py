@@ -21,17 +21,8 @@ from enum import Enum
 class EventType(Enum):
     """Types of events to log."""
     MESSAGE_RECEIVED = "message_received"
-    INTENT_CLASSIFIED = "intent_classified"
-    CONTEXT_LOADED = "context_loaded"
-    DOCS_SEARCHED = "docs_searched"
-    REASONING_ITERATION = "reasoning_iteration"
-    CLARIFICATION_NEEDED = "clarification_needed"
-    CLARIFICATION_SENT = "clarification_sent"
-    SOLUTION_PROVIDED = "solution_provided"
-    ESCALATION_TRIGGERED = "escalation_triggered"
-    RESPONSE_SENT = "response_sent"
-    ERROR_OCCURRED = "error_occurred"
     NODE_STEP = "node_step"
+    ERROR_OCCURRED = "error_occurred"
 
 
 def _format_step_summary(summary: Dict[str, Any]) -> str:
@@ -170,94 +161,6 @@ class StructuredLogger:
             metadata={
                 "text": text,
                 "user_profile": user_profile
-            }
-        )
-    
-    def log_reasoning_iteration(
-        self,
-        iteration: int,
-        thought_process: str,
-        user_id: str,
-        channel_id: str,
-    ) -> None:
-        """Log a reasoning iteration."""
-        reasoning_data = {
-            "timestamp": datetime.now().isoformat(),
-            "iteration": iteration,
-            "thought_process": thought_process,
-            "user_id": user_id,
-            "channel_id": channel_id,
-        }
-
-        self._write_jsonl(self.reasoning_log, reasoning_data)
-
-        self.logger.debug(
-            f"Reasoning iteration {iteration} | "
-            f"Thought: {thought_process[:100]}..."
-        )
-    
-    def log_docs_searched(
-        self,
-        query: str,
-        num_results: int,
-        top_results: list,
-        user_id: str,
-        channel_id: str
-    ) -> None:
-        """Log documentation search."""
-        self.log_event(
-            event_type=EventType.DOCS_SEARCHED,
-            message=f"Searched docs for: {query}",
-            user_id=user_id,
-            channel_id=channel_id,
-            metadata={
-                "query": query,
-                "num_results": num_results,
-                "top_results": top_results
-            }
-        )
-    
-    def log_response_sent(
-        self,
-        user_id: str,
-        channel_id: str,
-        response_text: str,
-        reasoning_summary: str,
-        thread_ts: Optional[str] = None,
-        docs_cited: Optional[list] = None,
-    ) -> None:
-        """Log a response sent to user."""
-        self.log_event(
-            event_type=EventType.RESPONSE_SENT,
-            message="Response sent",
-            user_id=user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            metadata={
-                "response_text": response_text,
-                "reasoning_summary": reasoning_summary,
-                "docs_cited": docs_cited or [],
-            }
-        )
-    
-    def log_escalation(
-        self,
-        user_id: str,
-        channel_id: str,
-        reason: str,
-        original_message: str,
-        thread_ts: Optional[str] = None
-    ) -> None:
-        """Log an escalation to human team."""
-        self.log_event(
-            event_type=EventType.ESCALATION_TRIGGERED,
-            message=f"Escalated to team: {reason}",
-            user_id=user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            metadata={
-                "reason": reason,
-                "original_message": original_message
             }
         )
     

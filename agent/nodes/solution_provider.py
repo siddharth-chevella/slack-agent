@@ -17,7 +17,7 @@ from agent.slack_client import create_slack_client
 from agent.persistence import get_database
 from agent.logger import get_logger
 from agent.llm import get_chat_completion
-from agent.config import ABOUT_OLAKE
+from agent.config import ABOUT_COMPANY, AGENT_NAME, COMPANY_NAME, COMPANY_VOICE
 
 log = logging.getLogger(__name__)
 
@@ -25,15 +25,16 @@ _NOT_ENOUGH_INFO = (
     "Something went wrong. Please try again later."
 )
 
-_SOLUTION_SYSTEM_TEMPLATE = """CRITICAL — Voice: You speak as OLake. When referring to OLake or the team, always use "we"/"our" or "OLake". Never use "they" or "their" for OLake.
+def _solution_system_prompt() -> str:
+    return f"""CRITICAL — Voice: {COMPANY_VOICE}
 
-You are Alex, a senior support engineer on the OLake team.
+You are {AGENT_NAME}, a senior support engineer on the {COMPANY_NAME} team.
 
-About OLake:
-{about_olake}
+About {COMPANY_NAME}:
+{ABOUT_COMPANY}
 
 Identity and voice:
-  - You speak as part of OLake: use "we" and "our", never "they" or "their" for OLake.
+  - {COMPANY_VOICE}
   - Talk like a human teammate in Slack, not like an AI assistant.
   - Never mention "the docs", "the reference files", "retrieved documents", or similar meta phrases.
   - Do not describe your process. Just answer directly as if you already know the product well.
@@ -47,10 +48,9 @@ Rules:
   - Use "you/your" when talking to the user. For procedural steps, use short numbered or bulleted lists.
   - Under ~300 words.
   - Direct answer first: for yes/no or single-fact questions, give the answer in one clear sentence first.
-  - Use "we"/"our" or "OLake" when referring to OLake — never "they" or "their".
 
 NULL-RESULT GUIDANCE: If the Research Summary below lists an error string under "Null results", \
-this means the exact string does NOT exist as a hardcoded literal in the OLake source code — \
+this means the exact string does NOT exist in the source code — \
 it is assembled at runtime (e.g. via fmt.Sprintf). In that case:
   1. Explicitly acknowledge that this is a runtime-generated validation message.
   2. Explain the likely root cause from product knowledge and any docs found.
@@ -58,10 +58,6 @@ it is assembled at runtime (e.g. via fmt.Sprintf). In that case:
   Do NOT say "we couldn't find it" in a helpless way — explain WHY and what to do.
 
 Return only the final Slack message text — no JSON, no markdown fences."""
-
-
-def _solution_system_prompt() -> str:
-    return _SOLUTION_SYSTEM_TEMPLATE.format(about_olake=ABOUT_OLAKE.strip())
 
 
 def _build_history_block(state: ConversationState, max_messages: int = 6) -> str:
@@ -144,15 +140,15 @@ def solution_provider(state: ConversationState) -> ConversationState:
     log.info("[SolutionProvider] start files=%d conceptual=%s", len(research_files), is_conceptual)
 
     try:
-        # slack_client = create_slack_client()
+        slack_client = create_slack_client()
 
         # Case 1: deep_researcher encountered an unrecoverable error
         if state.get("research_error") and state.get("response_text"):
             final_message = (state["response_text"] or "").strip()
             print(f"[SolutionProvider] ✗ Research error path — sending error message ({len(final_message)} chars)")
             log.warning("[SolutionProvider] research error fallback len=%d", len(final_message))
-            # slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
-            # _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
+            slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
+            _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
 
             print(f"[SolutionProvider] Error message: {final_message}")
 
@@ -162,9 +158,9 @@ def solution_provider(state: ConversationState) -> ConversationState:
         if not research_files and not is_conceptual:
             print("[SolutionProvider] ⚠ No research files found — sending not-enough-info message")
             log.info("[SolutionProvider] no files, not conceptual — sending not-enough-info")
-            # slack_client.send_message(channel=channel_id, text=_NOT_ENOUGH_INFO, thread_ts=thread_ts)
+            slack_client.send_message(channel=channel_id, text=_NOT_ENOUGH_INFO, thread_ts=thread_ts)
             state["response_text"] = _NOT_ENOUGH_INFO
-            # _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], _NOT_ENOUGH_INFO)
+            _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], _NOT_ENOUGH_INFO)
             print(f"[SolutionProvider] Not enough info message: {_NOT_ENOUGH_INFO}")
             return state
 
@@ -185,9 +181,9 @@ def solution_provider(state: ConversationState) -> ConversationState:
         print("-"*100)
         print(f"[SolutionProvider] ✓ Answer ready ({len(final_message)} chars) — sending to Slack")
         log.info("[SolutionProvider] answer len=%d", len(final_message))
-        # slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
+        slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
 
-        # _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
+        _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
 
     except Exception as e:
         logger.log_error(
