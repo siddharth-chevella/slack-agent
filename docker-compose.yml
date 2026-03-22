@@ -1,37 +1,100 @@
-# OLake Slack Agent — full stack
+# Slack Agent — full stack
 #
-# Services:
-#   postgres   — hosted persistence (always on)
-#   agent      — Slack webhook server
-#   eval       — evaluation dashboard (optional, use --profile eval to include)
+# Agent image: pre-built on Docker Hub (linux/amd64 + linux/arm64). Override with:
+#   SLACK_AGENT_IMAGE=youruser/slack-agent:latest docker compose up -d
+# To build and push yourself: scripts/docker-build-push-agent.sh
 #
-# Quick start:
-#   docker compose up -d                    # postgres + agent
-#   docker compose --profile eval up -d    # postgres + agent + eval dashboard
+# Optional local build instead of pull:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 #
-# The agent & eval containers read their config from .env at project root.
-# Both services share the same named volumes so they read/write the same
-# data/, logs/, and .github_repos/ directories.
+# Ollama runs by default (service `ollama`). Set LLM_PROVIDER=ollama and pull a model, e.g.:
+#   docker compose exec ollama ollama pull llama3.2
+#
+# Configuration lives in this file (no separate .env required).
+#
+# Non-secret defaults are set below. For API keys and Slack credentials, either:
+#   • Edit the placeholder values under x-app-environment, or
+#   • Export variables in your shell before `docker compose up` (Compose substitutes
+#     ${VAR} from the environment; optional :- defaults apply when unset).
+#
+# Avoid committing real secrets to version control. Use a private fork, CI secrets,
+# or a gitignored override file if you need local-only values.
+
+x-postgres-password: &postgres-password "${POSTGRES_PASSWORD:-slack_agent_dev}"
+
+# Shared application environment for the agent service.
+x-app-environment: &app-environment
+  # --- Identity (optional; config/agent.yaml is the default source) ---
+  AGENT_NAME: ""
+  COMPANY_NAME: ""
+
+  # --- LLM Provider to use---
+  LLM_PROVIDER: ollama
+
+  # --- LLM Provider Keys ---
+
+  # --- OpenAI ---
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_MODEL: gpt-4o
+
+  # --- Google Gemini ---
+  GEMINI_API_KEY: ${GEMINI_API_KEY}
+  GEMINI_MODEL: gemini-3-flash
+
+  # --- OpenRouter ---
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+  OPENROUTER_MODEL: anthropic/claude-sonnet-4-5
+  OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL}
+
+  # --- Ollama ---
+  OLLAMA_BASE_URL: http://ollama:11434/v1
+  OLLAMA_MODEL: ${OLLAMA_MODEL}
+
+  # --- Slack (required for the agent service) ---
+  SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+  SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET}
+  SLACK_APP_ID: ${SLACK_APP_ID}
+  SLACK_CLIENT_ID: ${SLACK_CLIENT_ID}
+  SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET}
+
+  # --- Database: path unused when DATABASE_URL is set ---
+  DATABASE_PATH: data/slack_agent.db
+
+  # --- Logging & server ---
+  LOG_LEVEL: INFO
+  LOG_DIR: logs
+  WEBHOOK_PORT: "8001"
+  WEBHOOK_PATH: /slack/events
+
+  # --- Optional channel lists (comma-separated Slack channel IDs) ---
+  IGNORED_CHANNELS: ""
+  HIGH_PRIORITY_CHANNELS: ""
+
+  # --- Tuning ---
+  LLM_REQUEST_TIMEOUT_SECONDS: "90"
+  MAX_RESEARCH_ITERATIONS: "20"
+  MAX_CONTEXT_FILES: "15"
+  RESEARCH_TIMEOUT_SECONDS: "120"
+  MAX_REASONING_ITERATIONS: "5"
+  ENABLE_DEEP_REASONING: "true"
 
 x-common-env: &common-env
-  env_file: .env
-  # Override DATABASE_URL to use the compose service name as host
   environment:
+    <<: *app-environment
+    # Inside the stack, Postgres hostname is the service name `postgres`.
     DATABASE_URL: postgresql://slack_agent:${POSTGRES_PASSWORD:-slack_agent_dev}@postgres:5432/slack_agent
 
 services:
 
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: slack_agent
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slack_agent_dev}
+      POSTGRES_PASSWORD: *postgres-password
       POSTGRES_DB: slack_agent
     ports:
-      # 5433 on host → 5432 in container; avoids clashing with a local Postgres
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - slack_agent_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -40,22 +103,35 @@ services:
       timeout: 5s
       retries: 10
 
-  # ── Slack Agent ─────────────────────────────────────────────────────────────
+  # Local LLM — runs by default; use with LLM_PROVIDER=ollama (pull models into the volume first).
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   agent:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.agent
+    image: siddharthchevella/slack-agent:latest
     restart: unless-stopped
     <<: *common-env
     ports:
       - "${WEBHOOK_PORT:-8001}:8001"
     volumes:
-      # Persist DB, logs, and cloned repos across restarts / rebuilds
       - agent_data:/app/data
       - agent_logs:/app/logs
       - github_repos:/app/.github_repos
     depends_on:
       postgres:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
@@ -64,25 +140,9 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Eval Dashboard (optional) ────────────────────────────────────────────────
-#   eval:
-#     profiles: ["eval"]
-#     build:
-#       context: .
-#       dockerfile: docker/Dockerfile.eval
-#     restart: unless-stopped
-#     <<: *common-env
-#     ports:
-#       - "${EVAL_APP_PORT:-8002}:8002"
-#     volumes:
-#       - agent_data:/app/data
-#       - agent_logs:/app/logs
-#     depends_on:
-#       postgres:
-#         condition: service_healthy
-
-# volumes:
-#   slack_agent_pgdata:
-#   agent_data:
-#   agent_logs:
-#   github_repos:
+volumes:
+  slack_agent_pgdata:
+  agent_data:
+  agent_logs:
+  github_repos:
+  ollama_data:

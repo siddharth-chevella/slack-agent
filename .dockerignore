@@ -42,8 +42,7 @@ Thumbs.db
 .vscode
 .idea
 
-# Docs and scripts not needed in the image
+# Docs and scripts not needed in the image (README.md is required: hatch reads it during uv sync)
 docs/
 scripts/
-README.md
 *.sh

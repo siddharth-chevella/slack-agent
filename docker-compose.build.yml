@@ -1,0 +1,7 @@
+# Merge for local builds: docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+# Produces the same tag as SLACK_AGENT_IMAGE / default image in docker-compose.yml.
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent

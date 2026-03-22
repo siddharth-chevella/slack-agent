@@ -5,7 +5,7 @@ WORKDIR /build
 
 RUN pip install --no-cache-dir uv
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 # Install runtime deps only (no dev extras) into /build/.venv
 RUN uv sync --frozen --no-dev
 
