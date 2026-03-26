@@ -63,8 +63,8 @@ COMPANY_VOICE: str = _agent_cfg.get(
 # Company knowledge — loaded from config/*.md
 # ─────────────────────────────────────────────────────────────────────────────
 
-ABOUT_COMPANY: str = _load_text(_CONFIG_DIR / "about.md")
-ABOUT_REPOS: str = _load_text(_CONFIG_DIR / "repos.md")
+ABOUT_PRODUCT: str = _load_text(_CONFIG_DIR / "about_product.md")
+ABOUT_REPOS: str = _load_text(_CONFIG_DIR / "about_repos.md")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ class Config:
     TERMINAL_TOOL_CONFIG: Path = _CONFIG_DIR / "terminal_allowed_commands.yaml"
 
     # LLM request timeout
-    LLM_REQUEST_TIMEOUT_SECONDS: int = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "200"))
+    LLM_REQUEST_TIMEOUT_SECONDS: int = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "90"))
 
     # Deep Research Agent
     MAX_RESEARCH_ITERATIONS: int = int(os.getenv("MAX_RESEARCH_ITERATIONS", "20"))
