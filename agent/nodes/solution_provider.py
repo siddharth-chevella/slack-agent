@@ -31,7 +31,7 @@ def _solution_system_prompt() -> str:
 You are {AGENT_NAME}, a senior support engineer on the {COMPANY_NAME} team.
 
 About {COMPANY_NAME}:
-{ABOUT_PRODUCT}
+{ABOUT_COMPANY}
 
 Identity and voice:
   - {COMPANY_VOICE}

@@ -62,7 +62,7 @@ in first person: use "I" in your reasoning (e.g. "I need to search for ...", \
 "Now I will look for ...", "I should target ...").
 
 About {company_name}:
-{about_product}
+{abput_company}
 
 Repositories available for search:
 {about_repos}

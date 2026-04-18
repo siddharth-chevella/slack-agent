@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SYNC_SCRIPT="$PROJECT_ROOT/scripts/sync_repos.py"
 LOG_DIR="$PROJECT_ROOT/logs"
-LOG_FILE="$LOG_DIR/github_sync.log"
+REPO_LOGS_DIR="$LOG_DIR/repo_logs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,7 +26,7 @@ echo "=============================================="
 echo "GitHub Repos Sync - Cron Setup"
 echo "=============================================="
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$REPO_LOGS_DIR"
 
 FREQUENCY="${1:-daily}"
 
@@ -54,13 +54,17 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-PYTHON_PATH=$(which python3)
-CRON_CMD="$CRON_SCHEDULE cd $PROJECT_ROOT && $PYTHON_PATH $SYNC_SCRIPT >> $LOG_FILE 2>&1"
+PYTHON_PATH="$PROJECT_ROOT/.venv/bin/python"
+if [ ! -x "$PYTHON_PATH" ]; then
+  PYTHON_PATH=$(which python3)
+fi
+# sync_repos.py writes to logs/repo_logs/YYYY-MM-DD.log (IST); no shell redirect needed
+CRON_CMD="$CRON_SCHEDULE cd $PROJECT_ROOT && $PYTHON_PATH $SYNC_SCRIPT"
 
 echo ""
 echo "Project root: $PROJECT_ROOT"
 echo "Sync script:  $SYNC_SCRIPT"
-echo "Log file:     $LOG_FILE"
+echo "Repo logs:    $REPO_LOGS_DIR/<YYYY-MM-DD>.log (IST)"
 echo "Python:       $PYTHON_PATH"
 echo ""
 
@@ -85,5 +89,5 @@ echo ""
 echo "Verify:      crontab -l"
 echo "Remove:      ./scripts/remove_github_sync.sh"
 echo "Manual sync: python3 scripts/sync_repos.py"
-echo "View logs:   tail -f $LOG_FILE"
+echo "View logs:   ls -la $REPO_LOGS_DIR && tail -f $REPO_LOGS_DIR/*.log"
 echo "=============================================="

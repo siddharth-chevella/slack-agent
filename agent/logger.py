@@ -1,13 +1,9 @@
 """
 Structured logging system for OLake Slack Community Agent.
 
-Provides comprehensive logging of all events including:
-- Incoming messages
-- User profiles
-- Reasoning steps
-- Documentation searches
-- Responses
-- Escalations
+Agent files (IST calendar day, under LOG_DIR/agent_logs/):
+  - YYYY-MM-DD.jsonl — structured events, errors, node steps
+  - YYYY-MM-DD.log   — slack_agent logger (DEBUG+)
 """
 
 import json
@@ -16,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from enum import Enum
+
+from agent.log_paths import agent_jsonl_path, agent_text_log_path, ist_timestamp_iso
 
 
 class EventType(Enum):
@@ -51,6 +49,43 @@ def _format_step_summary(summary: Dict[str, Any]) -> str:
     return "  ".join(parts)
 
 
+class _IstDailyTextFileHandler(logging.Handler):
+    """Append to agent_logs/YYYY-MM-DD.log; reopen when IST date changes."""
+
+    def __init__(self, log_dir: Path) -> None:
+        super().__init__()
+        self._log_dir = Path(log_dir)
+        self._date_key: Optional[str] = None
+        self._stream: Optional[Any] = None
+
+    def _ensure_stream(self) -> None:
+        from agent.log_paths import ist_date_str
+
+        today = ist_date_str()
+        if self._date_key != today or self._stream is None:
+            if self._stream is not None:
+                self._stream.close()
+            self._date_key = today
+            path = agent_text_log_path(self._log_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._stream = open(path, "a", encoding="utf-8")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._ensure_stream()
+            msg = self.format(record)
+            self._stream.write(msg + "\n")
+            self._stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+        super().close()
+
+
 class StructuredLogger:
     """Structured logger for agent events."""
 
@@ -59,17 +94,12 @@ class StructuredLogger:
         Initialize structured logger.
 
         Args:
-            log_dir: Directory for log files
+            log_dir: Base directory (LOG_DIR); writes to agent_logs/ subfolder
             log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
             enable_console: Whether to log to console (disable for CLI mode to avoid duplicates)
         """
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
-
-        # Create separate log files
-        self.events_log = self.log_dir / "events.jsonl"
-        self.errors_log = self.log_dir / "errors.jsonl"
-        self.reasoning_log = self.log_dir / "reasoning.jsonl"
+        self._base_log_dir = Path(log_dir)
+        self._base_log_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup standard logger
         self.logger = logging.getLogger("slack_agent")
@@ -89,20 +119,21 @@ class StructuredLogger:
             console_handler.setFormatter(console_formatter)
             self.logger.addHandler(console_handler)
 
-        # File handler for detailed logs
-        file_handler = logging.FileHandler(self.log_dir / "agent.log")
+        file_handler = _IstDailyTextFileHandler(self._base_log_dir)
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s | %(name)s | %(levelname)s | %(message)s'
         )
         file_handler.setFormatter(file_formatter)
         self.logger.addHandler(file_handler)
-    
-    def _write_jsonl(self, filepath: Path, data: Dict[str, Any]) -> None:
-        """Write a JSON line to a log file."""
-        with open(filepath, 'a') as f:
-            f.write(json.dumps(data) + '\n')
-    
+
+    def _write_jsonl(self, data: Dict[str, Any]) -> None:
+        """Append one JSON line to today's IST agent jsonl file."""
+        path = agent_jsonl_path(self._base_log_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data, default=str) + "\n")
+
     def log_event(
         self,
         event_type: EventType,
@@ -114,7 +145,7 @@ class StructuredLogger:
     ) -> None:
         """
         Log a structured event.
-        
+
         Args:
             event_type: Type of event
             message: Human-readable message
@@ -124,7 +155,7 @@ class StructuredLogger:
             metadata: Additional metadata
         """
         event_data = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": ist_timestamp_iso(),
             "event_type": event_type.value,
             "message": message,
             "user_id": user_id,
@@ -132,18 +163,18 @@ class StructuredLogger:
             "thread_ts": thread_ts,
             "metadata": metadata or {}
         }
-        
-        self._write_jsonl(self.events_log, event_data)
-        
+
+        self._write_jsonl(event_data)
+
         # Also log to standard logger
         log_msg = f"{event_type.value.upper()}: {message}"
         if user_id:
             log_msg += f" | User: {user_id}"
         if channel_id:
             log_msg += f" | Channel: {channel_id}"
-        
+
         self.logger.info(log_msg)
-    
+
     def log_message_received(
         self,
         user_id: str,
@@ -186,7 +217,7 @@ class StructuredLogger:
                 "preview": text[:500],
             },
         )
-    
+
     def log_error(
         self,
         error_type: str,
@@ -197,16 +228,16 @@ class StructuredLogger:
     ) -> None:
         """Log an error."""
         error_data = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": ist_timestamp_iso(),
             "error_type": error_type,
             "error_message": error_message,
             "stack_trace": stack_trace,
             "user_id": user_id,
             "channel_id": channel_id
         }
-        
-        self._write_jsonl(self.errors_log, error_data)
-        
+
+        self._write_jsonl(error_data)
+
         self.logger.error(
             f"ERROR: {error_type} - {error_message}",
             exc_info=stack_trace is not None
@@ -217,9 +248,8 @@ class StructuredLogger:
         msg = f"STEP  →  {node_name}"
         self.logger.debug(msg)
         self._write_jsonl(
-            self.events_log,
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": ist_timestamp_iso(),
                 "event_type": EventType.NODE_STEP.value,
                 "phase": "start",
                 "node": node_name,
@@ -240,9 +270,8 @@ class StructuredLogger:
             msg = f"STEP  ←  {node_name}  {summary_str}"
         self.logger.debug(msg)
         self._write_jsonl(
-            self.events_log,
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": ist_timestamp_iso(),
                 "event_type": EventType.NODE_STEP.value,
                 "phase": "end",
                 "node": node_name,
