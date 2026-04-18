@@ -17,6 +17,7 @@ class ResearchFile:
     matches: List[str]        # matching lines/snippets
     retrieval_reason: str     # why this file was retrieved
     search_pattern: Optional[str] = None  # pattern used for retrieval
+    doc_url: Optional[str] = None         # canonical olake.io/docs URL when path is in olake-docs
 
 
 class ConversationState(TypedDict):

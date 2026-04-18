@@ -62,7 +62,7 @@ in first person: use "I" in your reasoning (e.g. "I need to search for ...", \
 "Now I will look for ...", "I should target ...").
 
 About {company_name}:
-{abput_company}
+{about_company}
 
 Repositories available for search:
 {about_repos}
@@ -97,9 +97,28 @@ PATTERN QUALITY RULES:
 - One regex covering all related variants beats multiple narrow searches
 - Use SEARCH HISTORY to avoid repeating searches that already returned useful results
 
-GO-TO Strategy to peform smart searches:
-1. Search for the pattern once with path="all". If it returns 0 results: this is a probable indication \
-that the pattern is not in the codebase. Do NOT retry the same pattern.
+REPO PRIORITY — docs-first for user-facing questions:
+- For how-to, configuration, "is X supported?", "how do I tune/enable Y?", and general \
+product questions, search the `olake-docs` repo FIRST. Users run OLake through the UI, \
+CLI, Docker, or Helm — they do NOT touch Go internals. Docs describe what is actually \
+user-configurable; the `olake` core repo mostly describes engine internals that users \
+cannot change.
+- Prefer patterns that match doc content: full phrases from the user's question, feature \
+names, config key names as they would appear in user-facing YAML/JSON examples. You can \
+target docs directly with path="olake-docs" (or search path="all" and notice which hits \
+are under `olake-docs/docs/...`).
+- Fall through to `olake` (Go core), `olake-ui`, `olake-helm`, or `olake-fusion` ONLY when \
+(a) docs did not answer the question, OR (b) the question genuinely requires code-level \
+analysis — specific error traces, reported bugs, or explaining internal behaviour.
+- If a match comes ONLY from the `olake` core and nothing analogous exists in `olake-docs`, \
+treat it as engine-internal and NOT user-configurable. Note this in conclusion_so_far \
+("Found X in core but no docs coverage — likely internal, not a user knob") and keep \
+searching docs before stopping.
+
+GO-TO Strategy to perform smart searches:
+1. Search for the pattern once with path="all" (or path="olake-docs" for a doc-style question). \
+If it returns 0 results: this is a probable indication that the pattern is not in the codebase. \
+Do NOT retry the same pattern.
 2. Immediately pivot to searching for PARTIAL TOKENS and Go identifiers related to the feature: \
 struct field names, function names, config keys, doc file paths for the relevant writer/format.
 3. If the data is not found even after multiple iterations, stop searching for it and return actions: [] immediately. \
@@ -352,6 +371,33 @@ def _legacy_search_params_to_actions(search_params: List[Dict[str, Any]]) -> Lis
     return actions
 
 
+_DOCS_PATH_PREFIX = "olake-docs/docs/"
+
+
+def _derive_doc_url(path: str) -> Optional[str]:
+    """
+    Map a cloned-repo file path like `olake-docs/docs/connectors/mysql/index.mdx`
+    to its canonical `https://olake.io/docs/...` URL. Best-effort only — Docusaurus
+    slug overrides via frontmatter are not resolved; returned URL should be treated
+    as a HINT and not quoted if it looks implausible.
+
+    Returns None for any path outside `olake-docs/docs/`.
+    """
+    if not path or not path.startswith(_DOCS_PATH_PREFIX):
+        return None
+    slug = path[len(_DOCS_PATH_PREFIX):]
+    for ext in (".mdx", ".md"):
+        if slug.endswith(ext):
+            slug = slug[: -len(ext)]
+            break
+    if slug.endswith("/index"):
+        slug = slug[: -len("/index")]
+    slug = slug.strip("/")
+    if not slug:
+        return "https://olake.io/docs"
+    return f"https://olake.io/docs/{slug}"
+
+
 def _group_hits_to_research_files(
     hits: List[SearchHit],
     tool_label: str,
@@ -374,6 +420,7 @@ def _group_hits_to_research_files(
                 matches=matches,
                 retrieval_reason=f"Found via {tool_label}",
                 search_pattern=search_pattern,
+                doc_url=_derive_doc_url(path),
             )
         )
     return files
@@ -628,6 +675,7 @@ class DeepResearcher:
                                     matches=[f"symbol: {action.get('symbol', '')}"],
                                     retrieval_reason=f"Found via {label}",
                                     search_pattern=str(action.get("symbol", "")),
+                                    doc_url=_derive_doc_url(p),
                                 )
                             )
                         if not files_found:
@@ -684,12 +732,14 @@ class DeepResearcher:
                             end_line=action.get("end_line"),
                         )
                         line_count = len((file_text or "").splitlines())
+                        _rf_path = str(action.get("path", ""))
                         rf = ResearchFile(
-                            path=str(action.get("path", "")),
+                            path=_rf_path,
                             content=file_text,
                             matches=[],
                             retrieval_reason=f"Read via {label}",
                             search_pattern=f"read_file:{action.get('path', '')}",
+                            doc_url=_derive_doc_url(_rf_path),
                         )
                         all_research_files[rf.path] = rf
                         # Track full content in recent_reads — it survives compaction and

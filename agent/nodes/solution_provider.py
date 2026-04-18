@@ -41,20 +41,27 @@ Identity and voice:
 
 Your job: Answer the user's question using the internal files/code snippets provided below.
 
+Scope of what you can recommend (IMPORTANT):
+  - Users run OLake through one of a few surfaces: the OLake UI, the CLI / Docker, or a Helm / Kubernetes deployment. The knobs available to them differ by surface, and most engine internals are NOT user-configurable on any surface.
+  - Only recommend settings, features, or steps that are DOCUMENTED for users (i.e. appear in olake-docs content, in user-facing JSON/YAML config examples, or are clearly described as a user-facing option in the retrieved context).
+  - Do NOT surface Go struct fields, private identifiers, internal constants, or engine-level concepts (e.g. batch size, chunking strategy, writer pool, global/stream/writer concurrency tiers, thread counts that are not an exposed flag) as if they were user knobs. If you only found something in the `olake` core repo and there is no corresponding user-facing mention in `olake-docs`, treat it as internal and do not instruct the user to change it.
+  - If a recommendation depends on which surface the user is on (UI vs CLI/Docker vs Helm) and their surface is not clear from the conversation, briefly ask which one they're using before giving specific steps. Keep the clarifying question to one short sentence.
+  - Describe outcomes in plain language ("increase the parallelism for large-table full refreshes", "configure the source connection to use a replica"). Do NOT prescribe specific UI clicks ("click the X button") or file-level edits ("edit state.json line 42") — point to the relevant docs page instead.
+
 Rules:
   - ONLY state things that are explicitly supported by the provided context. Do not invent, infer, or assume anything not directly present in the context — if it isn't there, don't say it.
   - If the context doesn't contain enough to answer, ask the user for more information/clarification rather than guessing.
   - Lead with the substance, no preambles like "Sure" or "Great question".
   - Use "you/your" when talking to the user. For procedural steps, use short numbered or bulleted lists.
   - Keep the response concise and to the point.
-  - DO NOT reference any code snippets or raw code. Refer only configuration that user can actually change — describe it in plain language.
-  - If the context includes documentation URLs that are directly relevant to the answer, include them so the user can read further. Only include links that are present in the provided context.
+  - DO NOT reference any code snippets or raw code. Refer only to configuration that a user can actually change — described in plain language.
+  - For how-to / configuration / "is X supported?" questions, prefer linking to the relevant `https://olake.io/docs/...` page over re-explaining everything inline. If a retrieved file has a `doc_url:` next to it, that URL is trustworthy — use it verbatim.
   - If your searches doesn't include any information, do not say 'the context I have doesn't include' or similar. Rather use phrasing like 'I did not find any information regarding...' or similar.
   - If user is appreciating something then respond with gratitude.
 
-NOTE: 
-    - OLake docs are available at https://olake.io/docs. When providing links to docs, use this as the base URL. When referencing a specific section of doc, use the '#' to link to the section. For example if referencing Datetime handling for mysql the use: https://olake.io/docs/connectors/mysql/#date-and-time-handling
-    - DO NOT guess the urls. If you don't know the EXACT url, do not include it.
+NOTE:
+    - OLake docs are available at https://olake.io/docs. When retrieved context contains `doc_url:` hints for `olake-docs/docs/...` files, those URLs are safe to cite verbatim. You MAY also append a section anchor (e.g. `#configuration`) only if that anchor is clearly present in the retrieved content.
+    - DO NOT guess or fabricate URLs. If you don't have a `doc_url` hint or a verbatim URL in the context, don't include a link.
 
 Return only the final Slack message text — no JSON, no markdown fences."""
 
@@ -76,9 +83,22 @@ def _build_files_block(research_files: List[Any], max_files: int = 8, max_snippe
     for idx, f in enumerate(research_files[:max_files], 1):
         path = getattr(f, "path", "")
         reason = getattr(f, "retrieval_reason", "") or ""
+        doc_url = getattr(f, "doc_url", None)
         snippet = (getattr(f, "content", "") or "").strip().replace("\n", " ")[:max_snippet]
-        parts.append(f"{idx}. {path}\n   Why: {reason}\n   Snippet: {snippet}")
+        url_line = f"\n   doc_url: {doc_url}" if doc_url else ""
+        parts.append(f"{idx}. {path}{url_line}\n   Why: {reason}\n   Snippet: {snippet}")
     return "\n".join(parts)
+
+
+def _has_docs_coverage(research_files: List[Any]) -> bool:
+    """True if at least one retrieved file is a user-facing docs page."""
+    for f in research_files or []:
+        if getattr(f, "doc_url", None):
+            return True
+        path = getattr(f, "path", "") or ""
+        if path.startswith("olake-docs/docs/"):
+            return True
+    return False
 
 
 async def _generate_solution(state: ConversationState) -> str:
@@ -96,9 +116,19 @@ async def _generate_solution(state: ConversationState) -> str:
         if research_summary else ""
     )
 
+    surface_hint = ""
+    if research_files and not _has_docs_coverage(research_files):
+        surface_hint = (
+            "\nRETRIEVAL HINT: The retrieved context is mostly engine-internal code (no "
+            "olake-docs pages were matched). Treat these as internals, NOT user-facing knobs. "
+            "If the user is asking how to tune / configure / change behaviour and their "
+            "surface (UI vs CLI/Docker vs Helm) is not clear from the thread, ask which one "
+            "they're using in one short sentence before prescribing any specific change.\n"
+        )
+
     user_prompt = f"""User question:
 {user_query}
-{summary_section}{research_summary_section}
+{summary_section}{research_summary_section}{surface_hint}
 Conversation so far (most recent messages last):
 {history_block}
 
