@@ -55,6 +55,7 @@ _HISTORY_COMPACT_INTERVAL = 8
 # System prompt (static — describes the agent role and tool contract only)
 # ---------------------------------------------------------------------------
 
+
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are {agent_name}, a senior support engineer at {company_name}. Think and reason explicitly \
 in first person: use "I" in your reasoning (e.g. "I need to search for ...", \
@@ -154,6 +155,7 @@ RULES:
 - Return empty actions [] when you have enough information to answer accurately.
 - Set is_conceptual true only for general-knowledge questions that need no code search; \
   leave actions empty in that case.\
+"""
 
 
 def _build_system_prompt() -> str:
