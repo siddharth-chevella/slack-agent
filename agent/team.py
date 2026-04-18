@@ -1,7 +1,7 @@
 """
 Team utilities: load config/team.json, bot user ID, and org-member detection.
 
-Used by main (startup) and context_builder (org_member_replied detection).
+Used by main (startup) to skip messages sent by org members.
 """
 
 import json

@@ -112,8 +112,6 @@ Answer the question using the context above. If the Research Summary lists the u
 
 Now write the final Slack message."""
 
-    print(f"(SolutionProvider) Input characters count: {len(user_prompt) + len(_solution_system_prompt())}")
-
     response = await get_chat_completion(
         messages=[
             {"role": "system", "content": _solution_system_prompt()},
@@ -136,8 +134,7 @@ def solution_provider(state: ConversationState) -> ConversationState:
 
     research_files = state.get("research_files") or []
     is_conceptual = state.get("is_conceptual", False)
-    print(f"\n[SolutionProvider] Starting  files={len(research_files)}  is_conceptual={is_conceptual}")
-    log.info("[SolutionProvider] start files=%d conceptual=%s", len(research_files), is_conceptual)
+    log.debug("[SolutionProvider] start files=%d conceptual=%s", len(research_files), is_conceptual)
 
     try:
         slack_client = create_slack_client()
@@ -145,43 +142,40 @@ def solution_provider(state: ConversationState) -> ConversationState:
         # Case 1: deep_researcher encountered an unrecoverable error
         if state.get("research_error") and state.get("response_text"):
             final_message = (state["response_text"] or "").strip()
-            print(f"[SolutionProvider] ✗ Research error path — sending error message ({len(final_message)} chars)")
-            log.warning("[SolutionProvider] research error fallback len=%d", len(final_message))
+            log.debug("[SolutionProvider] research error fallback len=%d", len(final_message))
             slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
+            logger.log_response_sent(
+                channel_id, final_message, thread_ts=thread_ts, source="solution_error_fallback"
+            )
             _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
-
-            print(f"[SolutionProvider] Error message: {final_message}")
 
             return state
 
         # Case 2: no files found and it wasn't a conceptual question → explicit admission
         if not research_files and not is_conceptual:
-            print("[SolutionProvider] ⚠ No research files found — sending not-enough-info message")
-            log.info("[SolutionProvider] no files, not conceptual — sending not-enough-info")
+            log.debug("[SolutionProvider] no files, not conceptual — sending not-enough-info")
             slack_client.send_message(channel=channel_id, text=_NOT_ENOUGH_INFO, thread_ts=thread_ts)
+            logger.log_response_sent(
+                channel_id, _NOT_ENOUGH_INFO, thread_ts=thread_ts, source="solution_not_enough_info"
+            )
             state["response_text"] = _NOT_ENOUGH_INFO
             _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], _NOT_ENOUGH_INFO)
-            print(f"[SolutionProvider] Not enough info message: {_NOT_ENOUGH_INFO}")
             return state
 
         # Case 3: normal path — generate answer with LLM
-        print(f"[SolutionProvider] 🤖 Generating answer (files={len(research_files)}, conceptual={is_conceptual})...")
-        log.info("[SolutionProvider] generating answer files=%d", len(research_files))
+        log.debug("[SolutionProvider] generating answer files=%d", len(research_files))
         try:
             final_message = asyncio.run(_generate_solution(state))
         except Exception as gen_err:
-            print(f"[SolutionProvider] ✗ LLM generation failed: {gen_err}")
-            logger.logger.warning("[SolutionProvider] LLM call failed: %s", gen_err)
+            logger.logger.debug("[SolutionProvider] LLM call failed: %s", gen_err)
             final_message = _NOT_ENOUGH_INFO
 
         final_message = (final_message or _NOT_ENOUGH_INFO).strip()
         state["response_text"] = final_message
 
-        print(f"[SolutionProvider] Answer message: {final_message}")
-        print("-"*100)
-        print(f"[SolutionProvider] ✓ Answer ready ({len(final_message)} chars) — sending to Slack")
-        log.info("[SolutionProvider] answer len=%d", len(final_message))
+        log.debug("[SolutionProvider] answer len=%d", len(final_message))
         slack_client.send_message(channel=channel_id, text=final_message, thread_ts=thread_ts)
+        logger.log_response_sent(channel_id, final_message, thread_ts=thread_ts, source="solution")
 
         _persist(db, logger, thread_ts, user_id, user_query, state["message_ts"], final_message)
 
@@ -200,6 +194,6 @@ def _persist(db, logger, thread_ts: str, user_id: str, user_query: str, message_
     try:
         db.save_message(thread_ts, user_id, "user", user_query, message_ts)
         db.save_message(thread_ts, None, "agent", agent_reply, message_ts + "_agent")
-        logger.logger.info("[SolutionProvider] persisted user+agent messages")
+        logger.logger.debug("[SolutionProvider] persisted user+agent messages")
     except Exception as persist_err:
         logger.logger.warning("[SolutionProvider] failed to persist messages: %s", persist_err)

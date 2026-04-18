@@ -59,28 +59,39 @@ class SlackClient:
     ) -> bool:
         """
         Verify Slack request signature.
-        
+
         Args:
             timestamp: X-Slack-Request-Timestamp header
             body: Raw request body
             signature: X-Slack-Signature header
-            
+
         Returns:
-            True if signature is valid
+            True if signature is valid. Returns False (never raises) on any
+            malformed input — missing headers, non-numeric timestamp, stale
+            timestamp, bad signing secret, etc.
         """
-        # Prevent replay attacks
-        if abs(time.time() - int(timestamp)) > 60 * 5:
+        if not timestamp or not signature or not self.signing_secret:
             return False
-        
-        # Compute expected signature
-        sig_basestring = f"v0:{timestamp}:{body}"
-        expected_signature = 'v0=' + hmac.new(
-            self.signing_secret.encode(),
-            sig_basestring.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        
-        return hmac.compare_digest(expected_signature, signature)
+
+        try:
+            ts_int = int(timestamp)
+        except (TypeError, ValueError):
+            return False
+
+        # Replay protection: reject anything older than 5 minutes.
+        if abs(time.time() - ts_int) > 60 * 5:
+            return False
+
+        try:
+            sig_basestring = f"v0:{timestamp}:{body}"
+            expected_signature = 'v0=' + hmac.new(
+                self.signing_secret.encode(),
+                sig_basestring.encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            return hmac.compare_digest(expected_signature, signature)
+        except Exception:  # noqa: BLE001
+            return False
     
     def is_bot_message(self, event: Dict[str, Any]) -> bool:
         """Check if message is from the bot itself."""

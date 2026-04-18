@@ -59,9 +59,6 @@ class ConversationState(TypedDict):
     # Response generation
     response_text: Optional[str]
 
-    # Org-member guard (set by context_builder; if True the bot stays silent)
-    org_member_replied: bool
-
     # Metadata
     processing_start_time: datetime
     error: Optional[str]
@@ -96,8 +93,6 @@ def create_initial_state(event: Dict[str, Any]) -> ConversationState:
         research_done=False,
 
         response_text=None,
-
-        org_member_replied=False,
 
         processing_start_time=datetime.now(),
         error=None,

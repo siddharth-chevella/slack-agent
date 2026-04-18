@@ -265,7 +265,6 @@ async def _compact_history(entries: List[str], user_query: str) -> str:
     joined = "\n\n".join(entries)
     user_msg = f"USER QUESTION: {user_query}\n\nSEARCH ITERATIONS TO SUMMARISE:\n{joined}"
     try:
-        print(f"(DeepResearcher: _compact_history) Input characters count: {len(user_msg) + len(_COMPACT_HISTORY_SYSTEM)}")
         summary = await get_chat_completion(
             messages=[
                 {"role": "system", "content": _COMPACT_HISTORY_SYSTEM},
@@ -427,22 +426,15 @@ class DeepResearcher:
         # Patterns that returned 0 results across all repos (for research_summary).
         null_result_patterns: List[str] = []
 
-        _SEP = "─" * 60
-        print(f"\n{_SEP}")
-        print(f"[DeepResearcher] Starting  query={user_query[:120]!r}")
-        print(f"[DeepResearcher] Context: {len(thread_context)} messages | summary={'yes' if thread_summary else 'no'}")
-        print(_SEP)
-        log.info("[DeepResearcher] start — query len=%d context=%d", len(user_query), len(thread_context))
+        log.debug("[DeepResearcher] start — query len=%d context=%d", len(user_query), len(thread_context))
 
         try:
             for iteration in range(1, self.max_iterations + 1):
-                print(f"\n[DeepResearcher] ── Iteration {iteration}/{self.max_iterations} ──────────────────────────")
-                log.info("[DeepResearcher] iteration %d", iteration)
+                log.debug("[DeepResearcher] iteration %d", iteration)
 
                 # --- Force exit if hard stuck-detector threshold hit ---
                 if consecutive_zero_new_files >= _ZERO_NEW_FILES_FORCE_EXIT:
-                    print(f"[DeepResearcher]   ⚠ Force-exit: {consecutive_zero_new_files} consecutive zero-gain iters")
-                    log.info("[DeepResearcher] force-exit zero_new_files=%d", consecutive_zero_new_files)
+                    log.debug("[DeepResearcher] force-exit zero_new_files=%d", consecutive_zero_new_files)
                     break
 
                 # --- Reflection pass: fire when threshold hit, once per zero-gain window ---
@@ -451,13 +443,11 @@ class DeepResearcher:
                     consecutive_zero_new_files >= _REFLECTION_AFTER_ITERS
                     and not reflection_fired_this_window
                 ):
-                    print(f"[DeepResearcher]   🔍 Firing reflection pass (zero_gain={consecutive_zero_new_files})")
-                    log.info("[DeepResearcher] reflection pass iter=%d", iteration)
+                    log.debug("[DeepResearcher] reflection pass iter=%d", iteration)
                     reflection_actions = self._run_reflection(user_query, search_history_entries)
                     reflection_fired_this_window = True
                     if reflection_actions is not None and len(reflection_actions) == 0:
-                        print("[DeepResearcher]   🔍 Reflection returned [] — handing off")
-                        log.info("[DeepResearcher] reflection returns empty — stopping")
+                        log.debug("[DeepResearcher] reflection returns empty — stopping")
                         break
 
                 # --- If reflection gave us actions, skip the planner this turn ---
@@ -478,8 +468,6 @@ class DeepResearcher:
                     )
                     pending_system_note = None  # consumed
 
-                    print(f"(DeepResearcher) Input characters count: {len(user_message) + len(self._system_prompt)}")
-
                     response = asyncio.run(get_chat_completion(
                         messages=[
                             {"role": "system", "content": self._system_prompt},
@@ -488,13 +476,11 @@ class DeepResearcher:
                         temperature=0.3,
                     ))
 
-                    print(f"[DeepResearcher]   LLM raw ({len(response or '')} chars): {(response or '')[:200]!r}")
                     log.debug("[DeepResearcher] raw LLM response iter=%d: %s", iteration, (response or "")[:300])
 
                     result = parse_planner_json(response)
 
                     if "error" in result:
-                        print(f"[DeepResearcher]   ✗ Parse error: {result['error']}")
                         log.warning("[DeepResearcher] Planner parse error iter=%d: %s", iteration, result["error"])
                         state["research_done"] = True
                         state["research_error"] = True
@@ -511,10 +497,7 @@ class DeepResearcher:
                     is_conceptual: bool = bool(result.get("is_conceptual", False))
                     last_is_conceptual = is_conceptual
 
-                    print(f"[DeepResearcher]   💭 Thinking: {thinking.strip()}")
-                    print(f"[DeepResearcher]   🎯 Intent:   {search_intent}")
-                    print(f"[DeepResearcher]   is_conceptual={is_conceptual}  actions={len(actions)}")
-                    log.info("[DeepResearcher] iter=%d thinking=%s... intent=%s params=%d conceptual=%s",
+                    log.debug("[DeepResearcher] iter=%d thinking=%s... intent=%s params=%d conceptual=%s",
                              iteration, thinking[:80], search_intent[:60], len(actions), is_conceptual)
 
                     thinking_log.append(f"Iteration {iteration}: {thinking}")
@@ -523,8 +506,7 @@ class DeepResearcher:
 
                     if is_conceptual or not actions:
                         reason = "conceptual question" if is_conceptual else "planner has enough info"
-                        print(f"[DeepResearcher]   ✓ Done ({reason}) — stopping search loop")
-                        log.info("[DeepResearcher] done after iter=%d reason=%s", iteration, reason)
+                        log.debug("[DeepResearcher] done after iter=%d reason=%s", iteration, reason)
                         # When the planner decided it can answer from context (no actions, no files),
                         # flag as conceptual so SolutionProvider proceeds to LLM generation instead
                         # of the "no files found" early-exit path.
@@ -539,8 +521,7 @@ class DeepResearcher:
                             pattern_seen_counts[key] = pattern_seen_counts.get(key, 0) + 1
                             count = pattern_seen_counts[key]
                             if count >= _SAME_PATTERN_FORCE_PIVOT:
-                                print(f"[DeepResearcher]   ⚠ Force-pivot: pattern seen {count}x — {key[:80]!r}")
-                                log.info("[DeepResearcher] force-pivot pattern=%r count=%d", key[:80], count)
+                                log.debug("[DeepResearcher] force-pivot pattern=%r count=%d", key[:80], count)
                                 pending_system_note = (
                                     f"Pattern {key!r} has been searched {count} times with no new results. "
                                     "You MUST try a completely different approach: use partial tokens, "
@@ -549,7 +530,6 @@ class DeepResearcher:
                                 actions = []  # force hand-off this turn
                                 break
                             if count == _SAME_PATTERN_WARN_THRESHOLD:
-                                print(f"[DeepResearcher]   ⚡ Pattern repeat warn ({count}x): {key[:80]!r}")
                                 pending_system_note = (
                                     f"WARNING: Pattern {key!r} has already been searched {count - 1} times "
                                     "with no useful results. Retrying it again is very unlikely to help — "
@@ -561,12 +541,10 @@ class DeepResearcher:
                         thinking_log.append(f"Iteration {iteration}: {thinking}")
                         if thinking.strip():
                             conclusions_log.append(f"Iter {iteration}: {thinking.strip()[:300]}")
-                        log.info("[DeepResearcher] force-pivot break iter=%d", iteration)
+                        log.debug("[DeepResearcher] force-pivot break iter=%d", iteration)
                         break
 
-                for i, action in enumerate(actions, 1):
-                    print(f"[DeepResearcher]   📦 Action {i}: {_action_to_label(action)}")
-                log.info("[DeepResearcher] iter=%d running %d actions", iteration, len(actions))
+                log.debug("[DeepResearcher] iter=%d running %d actions", iteration, len(actions))
 
                 action_blocks: List[str] = []
                 new_file_count_before = len(all_research_files)
@@ -735,12 +713,7 @@ class DeepResearcher:
 
                 total_files = len(all_research_files)
                 added_this_iter = total_files - new_file_count_before
-                print(f"[DeepResearcher]   📁 Added {added_this_iter} file(s) (total: {total_files})")
-                for p in list(all_research_files.keys())[:8]:
-                    print(f"                      • {p}")
-                if total_files > 8:
-                    print(f"[DeepResearcher]      … and {total_files - 8} more")
-                log.info("[DeepResearcher] iter=%d added_files=%d total=%d",
+                log.debug("[DeepResearcher] iter=%d added_files=%d total=%d",
                          iteration, added_this_iter, total_files)
 
                 history_entry = (
@@ -756,8 +729,7 @@ class DeepResearcher:
                     tail = search_history_entries[-_HISTORY_COMPACT_INTERVAL:]
                     head = search_history_entries[:-_HISTORY_COMPACT_INTERVAL]
                     if head:
-                        print(f"[DeepResearcher]   📦 Compacting {len(head)} older history entries…")
-                        log.info("[DeepResearcher] compacting %d history entries iter=%d", len(head), iteration)
+                        log.debug("[DeepResearcher] compacting %d history entries iter=%d", len(head), iteration)
                         compacted = asyncio.run(_compact_history(head, user_query))
                         search_history_entries = [compacted] + tail
 
@@ -770,23 +742,19 @@ class DeepResearcher:
                             "You MUST change strategy: use path='all', try partial token patterns, "
                             "search doc file paths, or return actions:[] to hand off with a bounded answer."
                         )
-                        print(f"[DeepResearcher]   ⚡ Zero-gain inject note (streak={consecutive_zero_new_files})")
                 else:
                     # Reset window state on any progress.
                     consecutive_zero_new_files = 0
                     reflection_fired_this_window = False
 
         except Exception as e:
-            print(f"\n[DeepResearcher] ✗ Unexpected error: {e}")
             log.warning("[DeepResearcher] unexpected error: %s", e, exc_info=True)
             state["research_done"] = True
             state["research_error"] = True
             state["response_text"] = f"An error occurred while researching: {e}"
             return state
 
-        print(f"\n[DeepResearcher] ✓ Complete — {len(all_research_files)} files, {len(search_history_entries)} iterations")
-        print(_SEP)
-        log.info("[DeepResearcher] complete: files=%d iterations=%d",
+        log.debug("[DeepResearcher] complete: files=%d iterations=%d",
                  len(all_research_files), len(search_history_entries))
 
         # Build a compact research_summary for the solution provider.
@@ -826,7 +794,6 @@ class DeepResearcher:
         """
         reflection_msg = _build_reflection_message(user_query, search_history_entries)
         try:
-            print(f"(DeepResearcher: _run_reflection) Input characters count: {len(reflection_msg) + len(_REFLECTION_SYSTEM)}")
             response = asyncio.run(get_chat_completion(
                 messages=[
                     {"role": "system", "content": _REFLECTION_SYSTEM},
@@ -840,8 +807,7 @@ class DeepResearcher:
                 return None
             diagnosis = parsed.get("diagnosis", "")
             actions = parsed.get("actions") or []
-            print(f"[DeepResearcher]   🔍 Reflection diagnosis: {diagnosis[:200]}")
-            log.info("[DeepResearcher] reflection diagnosis=%s actions=%d", diagnosis[:120], len(actions))
+            log.debug("[DeepResearcher] reflection diagnosis=%s actions=%d", diagnosis[:120], len(actions))
             return actions
         except Exception as e:
             log.warning("[DeepResearcher] reflection call failed: %s", e)

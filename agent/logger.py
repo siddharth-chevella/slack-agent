@@ -21,6 +21,7 @@ from enum import Enum
 class EventType(Enum):
     """Types of events to log."""
     MESSAGE_RECEIVED = "message_received"
+    RESPONSE_SENT = "response_sent"
     NODE_STEP = "node_step"
     ERROR_OCCURRED = "error_occurred"
 
@@ -163,6 +164,28 @@ class StructuredLogger:
                 "user_profile": user_profile
             }
         )
+
+    def log_response_sent(
+        self,
+        channel_id: str,
+        text: str,
+        thread_ts: Optional[str] = None,
+        *,
+        source: str = "solution",
+    ) -> None:
+        """Log that a reply was posted to Slack (webhook path)."""
+        self.log_event(
+            event_type=EventType.RESPONSE_SENT,
+            message=f"Slack response sent ({source})",
+            user_id=None,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            metadata={
+                "length": len(text),
+                "source": source,
+                "preview": text[:500],
+            },
+        )
     
     def log_error(
         self,
@@ -190,9 +213,9 @@ class StructuredLogger:
         )
 
     def log_step_start(self, node_name: str) -> None:
-        """Log that a graph node is about to run (pretty, easy to grep)."""
+        """Log that a graph node is about to run (DEBUG on console; JSONL retained)."""
         msg = f"STEP  →  {node_name}"
-        self.logger.info(msg)
+        self.logger.debug(msg)
         self._write_jsonl(
             self.events_log,
             {
@@ -215,7 +238,7 @@ class StructuredLogger:
         else:
             summary_str = _format_step_summary(summary or {})
             msg = f"STEP  ←  {node_name}  {summary_str}"
-        self.logger.info(msg)
+        self.logger.debug(msg)
         self._write_jsonl(
             self.events_log,
             {

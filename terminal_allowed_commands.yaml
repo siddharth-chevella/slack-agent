@@ -1,0 +1,19 @@
+allowed_commands:
+- ls
+- pwd
+- whoami
+- date
+- uname
+allowed_patterns:
+- ^ls\s*
+- ^cat\s+
+- ^head\s+
+- ^tail\s+
+- ^grep\s+
+- ^find\s+
+- ^pwd
+- ^echo\s+
+- ^wc\s+
+- ^tree\s*
+max_output_length: 10000
+timeout: 60

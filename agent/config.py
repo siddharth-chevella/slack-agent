@@ -97,8 +97,7 @@ class Config:
     MAX_REASONING_ITERATIONS: int = int(os.getenv("MAX_REASONING_ITERATIONS", "5"))
     ENABLE_DEEP_REASONING: bool = os.getenv("ENABLE_DEEP_REASONING", "true").lower() == "true"
 
-    # Database — SQLite file (default) or PostgreSQL when DATABASE_URL is set (Docker / hosted)
-    DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/slack_agent.db")
+    # Database — PostgreSQL only (set URL to the Docker postgres service or any instance)
     DATABASE_URL: Optional[str] = _optional_stripped_env("DATABASE_URL")
 
     # Logging
@@ -149,6 +148,12 @@ class Config:
         if cls.LLM_PROVIDER == "openrouter" and not cls.OPENROUTER_API_KEY:
             errors.append("OPENROUTER_API_KEY is required when using OpenRouter")
 
+        if not cls.DATABASE_URL:
+            errors.append(
+                "DATABASE_URL is required (PostgreSQL only). "
+                "Example: postgresql://USER:PASSWORD@localhost:5433/slack_agent (docker-compose exposes 5433)"
+            )
+
         if errors:
             for error in errors:
                 print(f"Configuration Error: {error}")
@@ -175,7 +180,7 @@ class Config:
             db = (parsed.path or "/").strip("/") or "?"
             print(f"Database:     PostgreSQL ({host}/{db})")
         else:
-            print(f"Database:     SQLite ({cls.DATABASE_PATH})")
+            print("Database:     (not set — DATABASE_URL required)")
         print(f"Webhook Port: {cls.WEBHOOK_PORT}")
         print(f"Log Level:    {cls.LOG_LEVEL}")
         print("=" * 50 + "\n")

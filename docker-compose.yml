@@ -57,9 +57,6 @@ x-app-environment: &app-environment
   SLACK_CLIENT_ID: ${SLACK_CLIENT_ID}
   SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET}
 
-  # --- Database: path unused when DATABASE_URL is set ---
-  DATABASE_PATH: data/slack_agent.db
-
   # --- Logging & server ---
   LOG_LEVEL: INFO
   LOG_DIR: logs

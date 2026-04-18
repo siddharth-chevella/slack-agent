@@ -24,7 +24,6 @@ def build_context(state: ConversationState) -> ConversationState:
     Sets:
       state["thread_context"]  — last 10 messages [{role, content, message_ts}, ...]
       state["thread_summary"]  — latest consolidated summary string, or None
-      state["org_member_replied"] — always False (detection removed)
     """
     logger = get_logger()
     db = get_database()
@@ -64,12 +63,6 @@ def build_context(state: ConversationState) -> ConversationState:
 
         state["thread_context"] = thread_context
         state["thread_summary"] = thread_summary
-        state["org_member_replied"] = False
-
-        print(
-            f"[ContextBuilder] ✓ thread_id={thread_id}  messages={len(thread_context)}  "
-            f"summary={'yes' if thread_summary else 'no'}"
-        )
 
     except Exception as e:
         logger.log_error(
@@ -80,6 +73,5 @@ def build_context(state: ConversationState) -> ConversationState:
         )
         state["thread_context"] = []
         state["thread_summary"] = None
-        state["org_member_replied"] = False
 
     return state

@@ -2,9 +2,7 @@
 LangGraph workflow for OLake Slack Community Agent (production).
 
 Topology:
-  build_context
-       └─ [org member in thread] → END silently
-  → gate_filter
+  build_context → gate_filter
        ├─ [harmful or irrelevant] → END  (reply already sent by gate_filter)
        ├─ [not actionable]        → END  (silent — "thanks" / noise)
        └─ [pass]                  → deep_researcher → solution → END
@@ -28,7 +26,6 @@ from agent.logger import get_logger
 def _step_summary(node_name: str, state: ConversationState) -> Dict[str, Any]:
     summary: Dict[str, Any] = {}
     if node_name == "build_context":
-        summary["org_member_replied"] = state.get("org_member_replied", False)
         summary["thread_messages"] = len(state.get("thread_context") or [])
     elif node_name == "gate_filter":
         summary["is_relevant"] = state.get("is_relevant")
@@ -85,16 +82,6 @@ def _wrap_node(node_name: str, node_fn: Callable[[ConversationState], Conversati
 # Routing functions
 # ---------------------------------------------------------------------------
 
-def route_after_context(
-    state: ConversationState,
-) -> Literal["gate_filter", "__end__"]:
-    """Exit silently if an org member is already in the thread."""
-    if state.get("org_member_replied"):
-        get_logger().logger.info("Org member in thread — bot staying silent.")
-        return "__end__"
-    return "gate_filter"
-
-
 def route_after_gate(
     state: ConversationState,
 ) -> Literal["deep_researcher", "__end__"]:
@@ -135,11 +122,7 @@ def create_agent_graph() -> StateGraph:
 
     workflow.set_entry_point("build_context")
 
-    workflow.add_conditional_edges(
-        "build_context",
-        route_after_context,
-        {"gate_filter": "gate_filter", "__end__": END},
-    )
+    workflow.add_edge("build_context", "gate_filter")
     workflow.add_conditional_edges(
         "gate_filter",
         route_after_gate,

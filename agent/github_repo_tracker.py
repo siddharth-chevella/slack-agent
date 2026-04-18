@@ -8,6 +8,8 @@ Manages cloning and syncing of GitHub repositories for codebase search.
 """
 
 import os
+import shutil
+import subprocess
 import yaml
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -15,9 +17,62 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 
-from agent.terminal_tool import TerminalTool, TerminalToolConfig
-
 log = logging.getLogger(__name__)
+
+_GIT_TIMEOUT_SECONDS = 300
+
+
+@dataclass
+class _GitResult:
+    """Minimal stand-in for TerminalTool's CommandResult."""
+    success: bool
+    stdout: str
+    stderr: str
+    return_code: int
+    error_message: Optional[str] = None
+
+
+def _run_git(argv: List[str], cwd: Optional[Path] = None) -> _GitResult:
+    """Run a git command without invoking a shell. argv must be a list of strings."""
+    try:
+        completed = subprocess.run(
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            cwd=str(cwd) if cwd else None,
+        )
+        return _GitResult(
+            success=completed.returncode == 0,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            return_code=completed.returncode,
+        )
+    except FileNotFoundError:
+        return _GitResult(
+            success=False,
+            stdout="",
+            stderr="",
+            return_code=-1,
+            error_message="git executable not found on PATH",
+        )
+    except subprocess.TimeoutExpired:
+        return _GitResult(
+            success=False,
+            stdout="",
+            stderr="",
+            return_code=-1,
+            error_message=f"git command timed out after {_GIT_TIMEOUT_SECONDS}s",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _GitResult(
+            success=False,
+            stdout="",
+            stderr="",
+            return_code=-1,
+            error_message=f"git execution error: {exc}",
+        )
 
 
 @dataclass
@@ -48,8 +103,7 @@ class GitHubRepoTracker:
         self.project_root = Path(__file__).parent.parent
         self.repos_dir = self.project_root / ".github_repos"
         self.config_path = config_path or (self.project_root / "config" / "repos.yaml")
-        self.terminal = TerminalTool()
-        
+
         self.repos: Dict[str, RepoConfig] = {}
         self._load_config()
     
@@ -147,14 +201,15 @@ class GitHubRepoTracker:
                 "path": str(repo_path),
             }
         
-        # Build clone command
-        branch_opt = f"--branch {repo.branch} " if repo.branch else ""
-        cmd = f"git clone {branch_opt}{repo.url} {repo_path}"
-        
-        log.info(f"Cloning {name}: {cmd}")
-        
-        result = self.terminal.execute(cmd)
-        
+        argv: List[str] = ["git", "clone"]
+        if repo.branch:
+            argv.extend(["--branch", repo.branch])
+        argv.extend([repo.url, str(repo_path)])
+
+        log.info("Cloning %s: %s", name, " ".join(argv))
+
+        result = _run_git(argv)
+
         if result.success:
             log.info(f"Successfully cloned {name} to {repo_path}")
             return {
@@ -193,11 +248,11 @@ class GitHubRepoTracker:
             return self.clone_repo(name)
         
         # Ensure upstream remote exists (use same URL as origin if missing)
-        check_remote = self.terminal.execute("git remote get-url upstream", working_dir=repo_path)
+        check_remote = _run_git(["git", "remote", "get-url", "upstream"], cwd=repo_path)
         if not check_remote.success:
-            add_upstream = self.terminal.execute(
-                f"git remote add upstream {repo.url}",
-                working_dir=repo_path,
+            add_upstream = _run_git(
+                ["git", "remote", "add", "upstream", repo.url],
+                cwd=repo_path,
             )
             if not add_upstream.success:
                 error_msg = add_upstream.stderr or add_upstream.error_message
@@ -207,10 +262,10 @@ class GitHubRepoTracker:
                     "message": f"Failed to add upstream remote: {error_msg}",
                 }
             log.info(f"Added upstream remote for {name}")
-        
+
         # Sync via fetch upstream and merge (no GitHub API)
         branch = repo.branch or "main"
-        fetch_result = self.terminal.execute("git fetch upstream", working_dir=repo_path)
+        fetch_result = _run_git(["git", "fetch", "upstream"], cwd=repo_path)
         if not fetch_result.success:
             error_msg = fetch_result.stderr or fetch_result.error_message
             log.error(f"Failed to fetch upstream for {name}: {error_msg}")
@@ -218,16 +273,16 @@ class GitHubRepoTracker:
                 "success": False,
                 "message": f"Failed to fetch upstream: {error_msg}",
             }
-        merge_result = self.terminal.execute(
-            f"git merge upstream/{branch}",
-            working_dir=repo_path,
+        merge_result = _run_git(
+            ["git", "merge", f"upstream/{branch}"],
+            cwd=repo_path,
         )
         if not merge_result.success:
             # Try master if main doesn't exist
             if branch == "main":
-                merge_result = self.terminal.execute(
-                    "git merge upstream/master",
-                    working_dir=repo_path,
+                merge_result = _run_git(
+                    ["git", "merge", "upstream/master"],
+                    cwd=repo_path,
                 )
             if not merge_result.success:
                 error_msg = merge_result.stderr or merge_result.error_message
@@ -299,13 +354,17 @@ class GitHubRepoTracker:
         # Optionally delete local clone
         if delete_local:
             repo_path = self.repos_dir / name
-            if repo_path.exists():
-                cmd = f"rm -rf {repo_path}"
-                result = self.terminal.execute(cmd)
-                if result.success:
-                    log.info(f"Deleted local clone: {repo_path}")
-                else:
-                    log.error(f"Failed to delete {repo_path}: {result.error_message}")
+            # Guard against path escape: only remove subdirectories of repos_dir.
+            try:
+                resolved = repo_path.resolve()
+                repos_root = self.repos_dir.resolve()
+                if repos_root not in resolved.parents:
+                    log.error("Refusing to delete %s: not inside %s", resolved, repos_root)
+                elif resolved.exists():
+                    shutil.rmtree(resolved, ignore_errors=False)
+                    log.info(f"Deleted local clone: {resolved}")
+            except Exception as exc:  # noqa: BLE001
+                log.error(f"Failed to delete {repo_path}: {exc}")
         
         log.info(f"Removed repository '{name}' from tracking")
         return {"success": True, "message": f"Removed '{name}' from tracking"}

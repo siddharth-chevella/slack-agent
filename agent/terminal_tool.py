@@ -5,7 +5,9 @@ This module provides a safe terminal execution environment where agents
 can only run commands that match configured allowed patterns.
 """
 
+import logging
 import re
+import shlex
 import subprocess
 import yaml
 from dataclasses import dataclass
@@ -141,7 +143,9 @@ class TerminalTool:
         if not command:
             return False, "Empty command"
 
-        # Security checks - block dangerous patterns
+        # Defense-in-depth substring blocklist. The real safety boundary is
+        # `execute()` running with shell=False + shlex.split, which prevents
+        # these metacharacters from being interpreted by a shell at all.
         dangerous_patterns = [
             ("|", "pipe operator"),
             (";", "command separator"),
@@ -174,8 +178,9 @@ class TerminalTool:
                 if re.match(pattern, command):
                     return True, None
             except re.error as e:
-                # Invalid regex in config, skip it
-                print(f"Warning: Invalid regex pattern '{pattern}': {e}")
+                logging.getLogger(__name__).warning(
+                    "Invalid regex pattern %r in terminal_allowed_commands: %s", pattern, e
+                )
                 continue
 
         return False, f"Command '{base_command}' is not in the allowed list"
@@ -217,10 +222,33 @@ class TerminalTool:
         work_dir = working_dir or self.config.working_directory or Path.cwd()
 
         try:
-            # Execute command
+            # Split into argv and execute without a shell so metacharacters can't
+            # be interpreted. posix=True is default on Unix; on Windows, shlex
+            # still tokenizes sensibly for our simple allow-listed commands.
+            try:
+                argv = shlex.split(command)
+            except ValueError as parse_err:
+                return CommandResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    return_code=-1,
+                    command=command,
+                    error_message=f"Command parse error: {parse_err}",
+                )
+            if not argv:
+                return CommandResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    return_code=-1,
+                    command=command,
+                    error_message="Empty command after parsing",
+                )
+
             result = subprocess.run(
-                command,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=exec_timeout,

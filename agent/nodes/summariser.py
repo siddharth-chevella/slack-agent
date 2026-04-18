@@ -120,8 +120,6 @@ async def _summarise_async(
     prior_summary: Optional[str],
     new_messages: List[Dict],
 ) -> str:
-    
-    print(f"(Summariser) Input characters count: {len(_build_user_prompt(prior_summary, new_messages)) + len(_SYSTEM_PROMPT)}")
 
     response = await get_chat_completion(
         messages=[

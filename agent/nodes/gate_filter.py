@@ -98,7 +98,6 @@ async def _classify(
     summary = f'\nThread summary: """{thread_summary}"""' if thread_summary else ""
     context = f"\nThread context (recent messages): {thread_context}" if thread_context else ""
     user_prompt = f'User message: """{user_query}"""{summary}{context}\n\nClassify this message.'
-    print(f"(GateFilter) Input characters count: {len(user_prompt) + len(system_prompt)}")
     response = await get_chat_completion(
         messages=[
             {"role": "system", "content": system_prompt},
@@ -130,7 +129,7 @@ def gate_filter(state: ConversationState) -> ConversationState:
 
     try:
         result = asyncio.run(_classify(user_query, thread_summary, thread_context))
-        logger.logger.info(
+        logger.logger.debug(
             "[GateFilter] relevant=%s actionable=%s harmful=%s type=%s",
             result.get("is_relevant"),
             result.get("is_actionable"),
@@ -146,13 +145,6 @@ def gate_filter(state: ConversationState) -> ConversationState:
     state["question_type"] = str(result.get("question_type") or "conceptual")
     state["block_reason"] = result.get("block_reason") or None
 
-    _icon = "✗" if (state["is_harmful"] or not state["is_relevant"] or not state["is_actionable"]) else "✓"
-    print(
-        f"[GateFilter] {_icon}  relevant={state['is_relevant']}  actionable={state['is_actionable']}  "
-        f"harmful={state['is_harmful']}  type={state['question_type']}"
-        + (f"  block_reason={state['block_reason']!r}" if state["block_reason"] else "")
-    )
-
     should_block = state["is_harmful"] or not state["is_relevant"]
     if should_block:
         reply = _harmful_reply() if state["is_harmful"] else _irrelevant_reply()
@@ -163,7 +155,10 @@ def gate_filter(state: ConversationState) -> ConversationState:
             channel_id = state.get("channel_id", "")
             thread_ts = state.get("thread_ts") or state.get("message_ts", "")
             slack_client.send_message(channel=channel_id, text=reply, thread_ts=thread_ts)
-            logger.logger.info("[GateFilter] sent block reply (harmful=%s)", state["is_harmful"])
+            logger.log_response_sent(
+                channel_id, reply, thread_ts=thread_ts, source="gate_filter_block"
+            )
+            logger.logger.debug("[GateFilter] sent block reply (harmful=%s)", state["is_harmful"])
         except Exception as slack_err:
             logger.logger.debug("[GateFilter] Slack send skipped (likely CLI mode): %s", slack_err)
 

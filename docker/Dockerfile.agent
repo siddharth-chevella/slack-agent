@@ -37,4 +37,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8001
 
-CMD ["python", "-m", "agent.main"]
+# Run under gunicorn in production. Workers=2 keeps memory modest for small VMs;
+# threads handle the I/O-bound LLM calls. Timeout is generous so long deep-research
+# runs don't get killed mid-flight (LLM_REQUEST_TIMEOUT_SECONDS defaults to 90).
+CMD ["gunicorn", \
+     "--workers", "2", \
+     "--threads", "8", \
+     "--timeout", "180", \
+     "--graceful-timeout", "30", \
+     "--bind", "0.0.0.0:8001", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "agent.main:app"]
